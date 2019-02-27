@@ -18,4 +18,4 @@ logger.addHandler(sh)
 
 logging.getLogger('raft.network').setLevel(logging.INFO)
 logging.getLogger('raft.eventloop').setLevel(logging.INFO)
-logging.getLogger('raft.core').setLevel(logging.DEBUG)
+logging.getLogger('raft.core').setLevel(logging.INFO)

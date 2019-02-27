@@ -421,16 +421,15 @@ class TcpTransport():
         node = message
         if node == 'client' or node in self._peer_nodes:
             if node == 'client':
-                logger.info("TcpTransport: incoming client [%s]" % node)
+                logger.info("TcpTransport: incoming client [%s]" % str(conn.remote_addr))
             else:
                 logger.debug("TcpTransport: incoming peer [%s] is [%s]" % 
-                            (conn.remote_addr, node))
+                            (str(conn.remote_addr), node))
                 logger.info("TcpTransport: node connected (in) [%s]" % node)
     
             conn.set_on_disconnected(self._on_disconnected_transport)
             conn.set_on_message_received(self._on_message_received_transport)
             if node == 'client':
-                logger.info("TcpTransport: incoming client [%s]" % node)
                 host, port =  conn.remote_addr
                 node = ":".join((host, str(port)))
             

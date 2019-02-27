@@ -29,6 +29,7 @@ class TCP_CONNECTION_STATE:
 
 
 class TcpConnection():
+    """ non blocking Tcp connection """
     def __init__(self, eventloop, socket=None, 
                  send_buffer_size=2 ** 13, 
                  recv_buffer_size=2 ** 13):
@@ -179,7 +180,8 @@ class TcpConnection():
                 if self._on_message_received_transport is not None:
                     #logging.debug("TcpConnection: Message recved: [%s] [%s]"
                     #    % (str(self.remote_addr), str(messages)))
-                    self._on_message_received_transport(self, messages)
+                    for message in messages:
+                        self._on_message_received_transport(self, message)
 
         if event_mask & EVENT_TYPE.WRITE:
             self._do_write()
@@ -261,6 +263,7 @@ class TCP_SERVER_STATE:
 
 
 class TcpServer():
+    """ non blocking Tcp Server """
     def __init__(self, host, port,
         eventloop, on_connected_transport,
         send_buffer_size=2 ** 13,
@@ -413,29 +416,32 @@ class TcpTransport():
 
     def _on_initial_message_received(self, conn, message):
         assert conn in self._unknown_conn
-        node = message[0]
-        if node not in self._peer_nodes:
-            logging.info("TcpTransport: incoming peer connection [%s] is not in the configured peer nodes"
-                % node)
-            self._unknown_conn.remove(conn)
-            conn.destory()
-        else:
-            logging.debug("TcpTransport: incoming peer [%s] is [%s]" % 
-                        (conn.remote_addr, node))
+        self._unknown_conn.remove(conn)
+        node = message
+        if node == 'client' or node in self._peer_nodes:
+            if node == 'client':
+                logging.info("TcpTransport: incoming client [%s]" % node)
+            else:
+                logging.debug("TcpTransport: incoming peer [%s] is [%s]" % 
+                            (conn.remote_addr, node))
+                logging.info("TcpTransport: node connected (in) [%s]" % node)
+    
             conn.set_on_disconnected(self._on_disconnected_transport)
             conn.set_on_message_received(self._on_message_received_transport)
-
-            self._node_to_conn[node].destory()
-            # del self._node_to_conn[node]
-
-            self._node_to_conn[node] = conn
-            self._unknown_conn.remove(conn)
-
-            logging.info("TcpTransport: node connected (in) [%s]" % node)
-            self._on_node_connected_raft(node)
+            if node == 'client':
+                logging.info("TcpTransport: incoming client [%s]" % node)
+                host, port =  conn.remote_addr
+                node = ":".join((host, str(port)))
             
-            if len(message) > 1:
-                self._on_message_received_transport(conn, message[1:])
+            if node in self._node_to_conn:
+                self._node_to_conn[node].destory()
+                # del self._node_to_conn[node]
+            self._node_to_conn[node] = conn
+
+            self._on_node_connected_raft(node)            
+        else:
+            logging.warning("TcpTransport: failed to init connction for [%s] bad initial message received." % str(conn.remote_addr))
+            conn.disconnect()
 
     def _on_disconnected_before_initial_message_transport(self, conn):
         logging.debug(

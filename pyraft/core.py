@@ -20,8 +20,12 @@ class MemoryLog():
             raise KeyError("first log index is 1")
         return self._l[index - 1]
 
-    def add(self, term, entry):
-        self._l.append((term, entry))
+    def add(self, term, command):
+        """
+        add a new log, return the index of that log.
+        """
+        self._l.append((term, command))
+        return len(self._l)
 
     def contain(self, index, term):
         if index == 0:
@@ -60,7 +64,7 @@ class RaftStateMachine():
         # "host:port" for this node, it's id
         self._self_node = self_node
         # list of "host:port" for raft peer nodes, peer's ids
-        self._peer_nodes = peer_nodes
+        self._peer_nodes = set(peer_nodes)
         
         if (len(peer_nodes) + 1) % 2 == 0:
             raise ValueError("number of node in cluster should be odd")
@@ -70,8 +74,8 @@ class RaftStateMachine():
         self._transport = TcpTransport(self_node, peer_nodes, 
                                        self._eventloop)
         self._transport.set_on_message_received(self._on_message_received)
-        self._transport.set_on_node_connected(None)
-        self._transport.set_on_node_disconnected(None)
+        self._transport.set_on_node_connected(self._on_node_connected)
+        self._transport.set_on_node_disconnected(self._on_node_disconnected)
 
         ### Persistent state on all servers ###
         ### (updated on stable storage before responding to RPCs) ###
@@ -116,6 +120,10 @@ class RaftStateMachine():
 
         self._on_apply_log = None
 
+        self._alive_peer_nodes = set()
+        self._client_nodes = set()
+        self._log_to_client = []
+
     @property
     def _last_log_index(self):
         return len(self._log)
@@ -159,11 +167,13 @@ class RaftStateMachine():
             self._eventloop.unregister_time_event(self._election_timeout_id)
         self._election_timeout_id = None
         
-
         self._heartbeat_timeout_id = self._eventloop.register_time_event(
                                         0,
                                         self._heartbeat_timeout_handler,
                                         self._get_random_heartbeat_timeout())
+
+        self._client_nodes = set()
+        self._log_to_client = []
 
     def _to_candidate(self):
         """
@@ -197,74 +207,104 @@ class RaftStateMachine():
 
     def _on_message_received(self, node, message):
         """ process incoming message from node """
+        
         m_type = message['type']
-        m_term = message['term']
-        if m_term > self._current_term:
-            self._current_term = m_term
-            self._voted_for = None
-            self._to_follower()
 
-        if m_type == 'request_vote':
-            m_last_log_index = message['last_log_index']
-            m_last_log_term = message['last_log_term']
-            if self._state == NODE_STATE.FOLLOWER:
-                if m_term < self._current_term:
-                    self._request_vode_response(node, False)
-                    return
-                if self._voted_for is None and not (
-                    self._last_log_term > m_last_log_term or
-                        (self._last_log_term == m_last_log_term and
-                        self._last_log_index > m_last_log_index) ):
-                    self._request_vode_response(node, True)
-                    self._voted_for = node
+        # message from node in raft cluster.
+        if node in self._peer_nodes:
+            m_term = message['term']
+            if m_term > self._current_term:
+                self._current_term = m_term
+                self._voted_for = None
+                self._to_follower()
 
-        elif m_type == 'request_vote_response':
-            vote_granted = message['vote_granted']
-            if self._state == NODE_STATE.CANDIDATE:
-                if m_term == self._current_term:
-                    if vote_granted is True:
-                        self._voted_by.add(node)
-                        if len(self._voted_by) >= self._majority:
-                            self._to_leader()
+            if m_type == 'request_vote':
+                m_last_log_index = message['last_log_index']
+                m_last_log_term = message['last_log_term']
+                if self._state == NODE_STATE.FOLLOWER:
+                    if m_term < self._current_term:
+                        self._request_vode_response(node, False)
+                        return
+                    if self._voted_for is None and not (
+                        self._last_log_term > m_last_log_term or
+                            (self._last_log_term == m_last_log_term and
+                            self._last_log_index > m_last_log_index) ):
+                        self._request_vode_response(node, True)
+                        self._voted_for = node
 
-        elif m_type == 'append_entries':
-            m_leader_id = message['leader_id']
-            m_prev_log_index = message['prev_log_index']
-            m_prev_log_term = message['prev_log_term']
-            m_entry = message['entry']
-            m_leader_commit = message['leader_commit']
-            if self._state in (NODE_STATE.CANDIDATE, NODE_STATE.FOLLOWER):
-                if m_term != self._current_term:
-                    self._append_entry_response(node, False)
-                    return
-                # candidate may find there is already a leader for this term.
+            elif m_type == 'request_vote_response':
+                vote_granted = message['vote_granted']
                 if self._state == NODE_STATE.CANDIDATE:
-                    self._to_follower()
-                # we know who is leader.
-                self._leader = node
-                if self._log.contain(m_prev_log_index, m_prev_log_term) is False:
-                    self._append_entry_response(node, False, m_prev_log_index + 1)
-                    return
-                self._log.delete_after(m_prev_log_index) 
-                if m_entry is not None:
-                    self._log.add(self._current_term ,m_entry)
-                    if m_leader_commit > self._commit_index:
-                        self._commit_index = min(m_leader_commit, self._last_log_index)
-                    self._append_entry_response(node, True, m_prev_log_index + 1)
-                    self._apply_log()
+                    if m_term == self._current_term:
+                        if vote_granted is True:
+                            self._voted_by.add(node)
+                            if len(self._voted_by) >= self._majority:
+                                self._to_leader()
 
-        elif m_type == 'append_entry_response':
-            m_success = message['success']
-            m_for_index = message['for_index']
-            if self._state == NODE_STATE.LEADER:
-                if m_term != self._current_term:
-                    return
-                if m_success is True and m_for_index == self._next_index[node]:
-                    self._match_index[node] = self._next_index[node]
-                    self._leader_check_commit()
-                    self._next_index[node] += 1
-                elif m_success is False and m_for_index == self._next_index[node]:
-                    self._next_index[node] -= 1
+            elif m_type == 'append_entries':
+                m_leader_id = message['leader_id']
+                m_prev_log_index = message['prev_log_index']
+                m_prev_log_term = message['prev_log_term']
+                m_entry = message['entry']
+                m_leader_commit = message['leader_commit']
+                if self._state in (NODE_STATE.CANDIDATE, NODE_STATE.FOLLOWER):
+                    if m_term != self._current_term:
+                        self._append_entry_response(node, False)
+                        return
+                    # candidate may find there is already a leader for this term.
+                    if self._state == NODE_STATE.CANDIDATE:
+                        self._to_follower()
+                    # we know who is leader.
+                    self._leader = node
+                    if self._log.contain(m_prev_log_index, m_prev_log_term) is False:
+                        self._append_entry_response(node, False, m_prev_log_index + 1)
+                        return
+                    self._log.delete_after(m_prev_log_index) 
+                    if m_entry is not None:
+                        self._log.add(self._current_term ,m_entry)
+                        if m_leader_commit > self._commit_index:
+                            self._commit_index = min(m_leader_commit, self._last_log_index)
+                        self._append_entry_response(node, True, m_prev_log_index + 1)
+                        self._apply_log()
+
+            elif m_type == 'append_entry_response':
+                m_success = message['success']
+                m_for_index = message['for_index']
+                if self._state == NODE_STATE.LEADER:
+                    if m_term != self._current_term:
+                        return
+                    if m_success is True and m_for_index == self._next_index[node]:
+                        self._match_index[node] = self._next_index[node]
+                        self._leader_check_commit()
+                        self._next_index[node] += 1
+                    elif m_success is False and m_for_index == self._next_index[node]:
+                        self._next_index[node] -= 1
+        
+        # message from client
+        elif node in self._client_nodes:
+            if m_type == 'client_request':
+                if self._state == NODE_STATE.LEADER:
+                    m_command = message['command']
+                    index = self._log.add(self._current_term, m_command)
+                    self._log_to_client[index] = node
+                else:
+                    self._server_response(node, False, m_command[0])
+        
+        # bugs in TcpTransport or RaftStateMachine
+        else:
+            assert False
+
+    def _on_node_connected(self, node):
+        if node in self._peer_nodes:
+            self._alive_peer_nodes.add(node)
+        else:
+            self._client_nodes.add(node)
+
+    def _on_node_disconnected(self, node):
+        if node in self._peer_nodes:
+            self._alive_peer_nodes.remove(node)
+        else:
+            self._client_nodes.remove(node)
 
     def _request_vote(self):
         """ invoked by candidates to gather votes """
@@ -314,6 +354,7 @@ class RaftStateMachine():
 
             message = {
                 'type': 'append_entries',
+                'term': self._current_term,
                 'leader_id': self._self_node,
                 'prev_log_index': prev_log_index,
                 'prev_log_term': prev_log_term,
@@ -330,6 +371,22 @@ class RaftStateMachine():
             'success': success,
             'for_index': for_index
         })
+
+    def _server_response(self, node, success, id):
+        if success:
+            message = {
+                'type': 'server_response',
+                'success' : True,
+                'command_id': id
+            }
+        else:
+            message = {
+                'type': 'server_response',
+                'success': False,
+                'command_id': id,
+                'redirect': self._leader
+            }
+        self._transport.send(node, message)
 
     def _leader_check_commit(self):
         index = self._last_log_index

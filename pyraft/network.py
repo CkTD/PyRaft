@@ -8,6 +8,7 @@ import errno
 
 from .eventloop import EventLoop, EVENT_TYPE
 
+logger = logging.getLogger('raft.network')
 
 
 def geterror(err):
@@ -83,7 +84,7 @@ class TcpConnection():
 
         self._remote = (host, int(port))
 
-        logging.debug("TcpConnection: try to connect nonblocking [%s]"
+        logger.debug("TcpConnection: try to connect nonblocking [%s]"
             % ":".join((host, str(port))))
 
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -102,9 +103,9 @@ class TcpConnection():
             self._socket.connect((host, port))
         except socket.error as e:
             if e.errno is not socket.errno.EINPROGRESS:
-                logging.error("  TcpConnection: [%s]" % geterror(e))
+                logger.error("  TcpConnection: [%s]" % geterror(e))
                 return False
-            #logging.debug("  TcpConnection: [%s]" % geterror(e))
+            #logger.debug("  TcpConnection: [%s]" % geterror(e))
         self._fileno = self._socket.fileno()
         self._state = TCP_CONNECTION_STATE.CONNECTING
         self._eventloop.register_file_event(
@@ -121,12 +122,12 @@ class TcpConnection():
 
         err = self._socket.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
         if err != 0:
-            logging.debug("TcpConnection: failed connect to [%s],  [%s]"
+            logger.debug("TcpConnection: failed connect to [%s],  [%s]"
                 % (self.remote_addr, geterror(err)))
             self.disconnect()
             return
 
-        logging.debug("TcpConnection: successfully connect to [%s],  [%s]")
+        logger.debug("TcpConnection: successfully connect to [%s],  [%s]")
 
         self._state = TCP_CONNECTION_STATE.CONNECTED
         self._last_active = time.time()
@@ -142,7 +143,7 @@ class TcpConnection():
 
     def disconnect(self):
         if self._state == TCP_CONNECTION_STATE.CONNECTED:
-            logging.debug("TcpConnection: disconnected [%s]", str(self.remote_addr))
+            logger.debug("TcpConnection: disconnected [%s]", str(self.remote_addr))
             if self._on_disconnected_transport is not None:
                 self._on_disconnected_transport(self)
 
@@ -165,7 +166,7 @@ class TcpConnection():
         if event_mask & EVENT_TYPE.ERROR:
             err = self._socket.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
             if err != 0:
-                logging.debug("TcpConnection: socket error [%s],  [%s]"
+                logger.debug("TcpConnection: socket error [%s],  [%s]"
                     % (self.remote_addr, geterror(err)))
             self.disconnect()
             return
@@ -178,7 +179,7 @@ class TcpConnection():
             messages = self._parse_messages()
             if messages is not None:
                 if self._on_message_received_transport is not None:
-                    #logging.debug("TcpConnection: Message recved: [%s] [%s]"
+                    #logger.debug("TcpConnection: Message recved: [%s] [%s]"
                     #    % (str(self.remote_addr), str(messages)))
                     for message in messages:
                         self._on_message_received_transport(self, message)
@@ -251,7 +252,7 @@ class TcpConnection():
         self.set_on_message_received(None)
 
     def __del__(self):
-        logging.debug("TcpConnection: DESTORIED: [%s]" % str(self.remote_addr))
+        logger.debug("TcpConnection: DESTORIED: [%s]" % str(self.remote_addr))
 
 
 ####################################################
@@ -298,7 +299,7 @@ class TcpServer():
         self._eventloop.register_file_event(
             self._fileno, EVENT_TYPE.READ | EVENT_TYPE.ERROR, self._on_connected_server
         )
-        logging.info("TcpServer: bind success. listen to [%s]" %
+        logger.info("TcpServer: bind success. listen to [%s]" %
                      ":".join((self._host, str(self._port))))
 
         self._state = TCP_SERVER_STATE.BINDED
@@ -314,7 +315,7 @@ class TcpServer():
     def _on_connected_server(self, fd, event_mask):
         if event_mask & EVENT_TYPE.READ:
             sock, address = self._socket.accept()
-            logging.debug("TcpServer: new connection: [%s]" % str(address))
+            logger.debug("TcpServer: new connection: [%s]" % str(address))
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF,
                             self._send_buffer_size)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF,
@@ -329,7 +330,7 @@ class TcpServer():
         self._unbind()
 
     def __del__(self):
-        logging.debug("TcpServer: DESTORIED.")
+        logger.debug("TcpServer: DESTORIED.")
 
 
 ####################################################
@@ -382,7 +383,7 @@ class TcpTransport():
         self._node_to_conn[node] = conn
 
     def _check_peers_connection(self):
-        logging.debug("TcpTransport: now, check connections.")
+        logger.debug("TcpTransport: now, check connections.")
         for node in self._peer_nodes:
             if self._node_to_conn[node].state is not TCP_CONNECTION_STATE.DISCONNECTED:
                 continue
@@ -393,7 +394,7 @@ class TcpTransport():
             self._node_to_conn[node].connect(host, int(port))
 
     def _on_outgoing_connected_transport(self, conn):
-        logging.info("TcpTransport: node connected(out) [%s]" % self._conn_to_node(conn))
+        logger.info("TcpTransport: node connected(out) [%s]" % self._conn_to_node(conn))
         self._on_node_connected_raft(self._conn_to_node(conn))
         conn.set_on_disconnected(self._on_disconnected_transport)
         conn.set_on_message_received(self._on_message_received_transport)
@@ -407,7 +408,7 @@ class TcpTransport():
 
     def _on_incoming_connected_transport(self, conn):
         self._unknown_conn.add(conn)
-        logging.info("TcpTransport: new incoming unknown peer connection [%s]"
+        logger.info("TcpTransport: new incoming unknown peer connection [%s]"
             % str(conn.remote_addr))
         conn.set_on_disconnected(
             self._on_disconnected_before_initial_message_transport)
@@ -420,16 +421,16 @@ class TcpTransport():
         node = message
         if node == 'client' or node in self._peer_nodes:
             if node == 'client':
-                logging.info("TcpTransport: incoming client [%s]" % node)
+                logger.info("TcpTransport: incoming client [%s]" % node)
             else:
-                logging.debug("TcpTransport: incoming peer [%s] is [%s]" % 
+                logger.debug("TcpTransport: incoming peer [%s] is [%s]" % 
                             (conn.remote_addr, node))
-                logging.info("TcpTransport: node connected (in) [%s]" % node)
+                logger.info("TcpTransport: node connected (in) [%s]" % node)
     
             conn.set_on_disconnected(self._on_disconnected_transport)
             conn.set_on_message_received(self._on_message_received_transport)
             if node == 'client':
-                logging.info("TcpTransport: incoming client [%s]" % node)
+                logger.info("TcpTransport: incoming client [%s]" % node)
                 host, port =  conn.remote_addr
                 node = ":".join((host, str(port)))
             
@@ -440,16 +441,16 @@ class TcpTransport():
 
             self._on_node_connected_raft(node)            
         else:
-            logging.warning("TcpTransport: failed to init connction for [%s] bad initial message received." % str(conn.remote_addr))
+            logger.warning("TcpTransport: failed to init connction for [%s] bad initial message received." % str(conn.remote_addr))
             conn.disconnect()
 
     def _on_disconnected_before_initial_message_transport(self, conn):
-        logging.debug(
+        logger.debug(
             "TcpTransport: incoming connect abort before get intial message")
         self._unknown_conn.remove(conn)
 
     def _on_disconnected_transport(self, conn):
-        logging.info("TcpTransport: node disconnected [%s]"%self._conn_to_node(conn))
+        logger.info("TcpTransport: node disconnected [%s]"%self._conn_to_node(conn))
         self._on_node_disconnected_raft(self._conn_to_node(conn))
 
     def _on_message_received_transport(self, conn, message):
@@ -475,7 +476,7 @@ class TcpTransport():
             del self._node_to_conn[node]
 
     def __del__(self):
-        logging.debug("TcpTranspot: DESTORIED.")
+        logger.debug("TcpTranspot: DESTORIED.")
 
 
 
@@ -483,13 +484,6 @@ class TcpTransport():
 # To run following example for TcpTransport
 # python -m pyraft.network self_port [peer_port ,...]
 if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        # filename='network.log',
-        format="%(asctime)s %(levelname)-7s %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-
     import sys
     localhost = "127.0.0.1"
     self_port = sys.argv[1]

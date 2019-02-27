@@ -4,6 +4,9 @@ import logging
 from .network import TcpTransport
 from .network import EventLoop, EVENT_TYPE
 
+
+logger = logging.getLogger('raft.core')
+
 class MemoryLog():
     """ 
     Log are tuple (term, command)
@@ -411,15 +414,10 @@ class RaftStateMachine():
         self._eventloop.run()
 
 
+
 if __name__ == '__main__':
     import sys
 
-    logging.basicConfig(
-        level=logging.INFO,
-        # filename='network.log',
-        format="%(asctime)s %(levelname)-7s %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
 
     localhost = "127.0.0.1"
     self_port = sys.argv[1]

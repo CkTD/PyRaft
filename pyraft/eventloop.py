@@ -3,6 +3,7 @@ import time
 import bisect
 import logging
 
+logger = logging.getLogger('raft.eventloop')
 
 class KeyGetter():
     """ helper class for insort """
@@ -79,7 +80,7 @@ class EventLoop():
     def run(self):
         self._running = True
         while self._running:
-            logging.debug("EventLoop: next loop")
+            logger.debug("EventLoop: next loop")
             self._process_event()
 
     def _get_time_to_nearest_time_event(self):
@@ -129,4 +130,4 @@ class EventLoop():
         self._poller.close()
 
     def __del__(self):
-        logging.debug("EventLoop: DESTORIED.")
+        logger.debug("EventLoop: DESTORIED.")

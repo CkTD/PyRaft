@@ -9,7 +9,7 @@ logger = logging.getLogger('raft.core')
 
 class MemoryLog():
     """ 
-    log is a tuple (term, (id,command))
+    log is a tuple (term, (serial,command))
     first log has index 1.
     """
     def __init__(self):
@@ -115,24 +115,29 @@ class RaftStateMachine():
         # initialized to 0, increases monotonically
         self._match_index = {}
 
+        # for all servers
         self._state = None
         self._leader = None
-        self._last_heartbeat = 0
+        self._on_apply_log = None
+        self._alive_peer_nodes = set()
+        self._client_nodes = set()
+        self._commit_serial = set()     # all serial numbers of committed log
 
+        # for candidate
         self._voted_by = set()
+
+        # for candidate and follower
         self._get_random_election_timeout = lambda: random.randint(5, 10)
         self._election_timeout_id = None
 
+        # for leader 
+        # log index -> client
+        # which client request the log? response that client after the log is committed 
+        self._log_to_client = {}   
         self._get_random_heartbeat_timeout = lambda: random.randint(3, 5)
         self._heartbeat_timeout_id = None
 
-        self._to_follower()
-
-        self._on_apply_log = None
-
-        self._alive_peer_nodes = set()
-        self._client_nodes = set()
-        self._log_to_client = {}
+        self._to_follower()  # when servers start up, they begin as followers. 
 
     @property
     def _last_log_index(self):
@@ -149,6 +154,15 @@ class RaftStateMachine():
         self._on_apply_log = callback
 
     def _to_follower(self):
+        """
+        A server remains in follower state as long as it receives valid
+        5RPCs from a leader or candidate. Leaders send periodic
+        heartbeats (AppendEntries RPCs that carry no log entries)
+        to all followers in order to maintain their authority. If a
+        follower receives no communication over a period of time
+        called the election timeout, then it assumes there is no vi-
+        able leader and begins an election to choose a new leader.
+        """
         logger.info("convert to follower. current term: %d" % self._current_term)
 
         self._state = NODE_STATE.FOLLOWER
@@ -168,6 +182,8 @@ class RaftStateMachine():
         self._state = NODE_STATE.LEADER
         self._leader = self._self_node
 
+        self._client_nodes = set()
+        self._log_to_client = {}
         for node in self._peer_nodes:
             self._next_index[node] = self._last_log_index + 1
             self._match_index[node] = 0
@@ -181,9 +197,6 @@ class RaftStateMachine():
                                         self._heartbeat_timeout_handler,
                                         self._get_random_heartbeat_timeout())
 
-        self._client_nodes = set()
-        self._log_to_client = {}
-
     def _to_candidate(self):
         """
         After election timeout, begin a new election. 
@@ -196,10 +209,9 @@ class RaftStateMachine():
         (b) another server establishes itself as leader, or
         (c) a period of time goes by with no winner. 
         """
-        logger.info("election timeout, convert to candidate and to new term: [%d]" % (self._current_term + 1))
-
         self._state = NODE_STATE.CANDIDATE
         self._leader = None
+
         self._current_term += 1
         self._voted_for = self._self_node
         self._voted_by = set()
@@ -211,6 +223,7 @@ class RaftStateMachine():
         self._request_vote()
 
     def _election_timeout_handler(self):
+        logger.info("election timeout, convert to candidate and to new term: [%d]" % (self._current_term + 1))
         self._to_candidate()
 
     def _heartbeat_timeout_handler(self):
@@ -218,7 +231,32 @@ class RaftStateMachine():
         self._append_entry()
 
     def _on_message_received(self, node, message):
-        """ process incoming message from node """
+        """ process incoming request
+        All Servers:
+            • If commitIndex > lastApplied: increment lastApplied, apply
+              log[lastApplied] to state machine (§5.3)
+            • If RPC request or response contains term T > currentTerm:
+              set currentTerm = T, convert to follower (§5.1)
+        Followers (§5.2):
+            • Respond to RPCs from candidates and leaders
+            • If command received from client: return False and tell the 
+              client who is leader if we know.
+        Candidates (§5.2):
+            • If AppendEntries RPC received from new leader: convert to
+              follower
+        Leaders:
+            • If command received from client: append entry to local log,
+              respond after entry applied to state machine (§5.3)
+            • If last log index ≥ nextIndex for a follower: send
+              AppendEntries RPC with log entries starting at nextIndex
+            • If successfully replicated log to follower: update nextIndex 
+              and matchIndex for follower (§5.3)
+            • If AppendEntries fails because of log inconsistency:
+              decrement nextIndex and retry (§5.3)
+            • If there exists an N such that N > commitIndex, a majority
+              of matchIndex[i] ≥ N, and log[N].term == currentTerm:
+              set commitIndex = N (§5.3, §5.4).
+        """
         logger.debug("receive message from [%s]: \n\t%s" %(node, str(message)))
 
         m_type = message['type']
@@ -238,14 +276,14 @@ class RaftStateMachine():
                 if self._state == NODE_STATE.FOLLOWER:
                     if m_term < self._current_term:
                         logger.info("reject request_vote by [%s]. from old term [%d]." %(node, m_term))
-                        self._request_vode_response(node, False)
+                        self._request_vote_response(node, False)
                         return
                     if self._voted_for is None and not (
                         self._last_log_term > m_last_log_term or
                             (self._last_log_term == m_last_log_term and
                             self._last_log_index > m_last_log_index) ):
                         logger.info("vote for %s" % node)
-                        self._request_vode_response(node, True)
+                        self._request_vote_response(node, True)
                         self._voted_for = node
                     else:
                         if self._voted_for is not None:
@@ -258,6 +296,8 @@ class RaftStateMachine():
                 if self._state == NODE_STATE.CANDIDATE:
                     if m_term == self._current_term:
                         if vote_granted is True:
+                            # a node can vote for only one time in a given term.
+                            # now, the response is must for corresponding request.
                             logger.info('voted by [%s]' % node)
                             self._voted_by.add(node)
                             if len(self._voted_by) >= self._majority:
@@ -311,7 +351,10 @@ class RaftStateMachine():
                     # check if leader have committed some log.
                     if m_leader_commit > self._commit_index:
                         logger.info("append_entry: leader commit is:[%d], local commit: [%d], local_last: [%d]" %(m_leader_commit, self._commit_index, self._last_log_index))
-                        self._commit_index = min(m_leader_commit, self._last_log_index)
+                        index = min(m_leader_commit, self._last_log_index)
+                        while self._commit_index < index:
+                            self._commit_index += 1
+                            self._commit_serial.add(self._log[self._commit_index][1][0])
                         self._apply_log()
 
             elif m_type == 'append_entry_response':
@@ -341,9 +384,22 @@ class RaftStateMachine():
             if m_type == 'client_request':
                 m_command = message['command']
                 if self._state == NODE_STATE.LEADER:
-                    logger.info("client request: add the command to log.")
-                    index = self._log.add((self._current_term, m_command))
-                    self._log_to_client[index] = node
+                    # if the leader crashes after committing the log entry but before respond-
+                    # ing to the client, the client will retry the command with a
+                    # new leader, causing it to be executed a second time. The
+                    # solution is for clients to assign unique serial numbers to
+                    # every command. Then, the state machine tracks the latest
+                    # serial number processed for each client, along with the as-
+                    # sociated response. If it receives a command whose serial
+                    # number has already been executed, it responds immedi-
+                    # ately without re-executing the request.
+                    if m_command[0] in self._commit_serial:
+                        logger.info("client request: command with serial id [%d] .already success in previous" % m_command[0])
+                        self._server_response(node, True, m_command[0])
+                    else:
+                        logger.info("client request: add the command to log.")
+                        index = self._log.add((self._current_term, m_command))
+                        self._log_to_client[index] = node
                 else:
                     logger.info("client request: redirect client to leader...")
                     self._server_response(node, False, m_command[0])
@@ -365,8 +421,8 @@ class RaftStateMachine():
             self._client_nodes.remove(node)
 
     def _request_vote(self):
-        """ invoked by candidates to gather votes """
-        """
+        """ 
+        invoked by candidates to gather votes.
         Raft uses the voting process to prevent a candidate from
         winning an election unless its log contains all committed
         entry. A candidate must contact a majority of the cluster
@@ -390,7 +446,7 @@ class RaftStateMachine():
         for node in self._peer_nodes:
             self._transport.send(node, message)
 
-    def _request_vode_response(self, node, vote_granted):
+    def _request_vote_response(self, node, vote_granted):
         """ invoked by follower to response request_vote """
         self._transport.send(node, {
             'type': 'request_vote_response',
@@ -422,7 +478,15 @@ class RaftStateMachine():
             self._transport.send(node, message)
 
     def _append_entry_response(self, node, success, for_index):
-        """ invoked by follower of candidate response append_entry request """
+        """ 
+        invoked by follower of candidate response append_entry request.
+        without RPC, several response to one log cause error on leader
+        so, for an append_entry requese, alway add for_index to the response to let 
+        the leader check if the response is for the corresponding request.
+
+        for_index is (pre_log_index + 1), which is also leader's next_index for this node  
+        the leader just check for_index == next_index to ignore duplicated response for same log 
+        """
         self._transport.send(node, {
             'type': 'append_entry_response',
             'term': self._current_term,
@@ -431,6 +495,7 @@ class RaftStateMachine():
         })
 
     def _server_response(self, node, success, id):
+        """ invoked by leader to respond client request """
         if success:
             message = {
                 'type': 'server_response',
@@ -469,6 +534,7 @@ class RaftStateMachine():
                 # commit entrys
                 while self._commit_index != index:
                     self._commit_index +=1
+                    self._commit_serial.add(self._log[self._commit_index][1][0])
                     logger.info("commit new log with index [%d]" % self._commit_index)
                     # response to client the success.
                     if self._commit_index in self._log_to_client:
@@ -507,8 +573,7 @@ class RaftStateMachine():
         self._election_timeout_id = self._eventloop.register_time_event(
                                         self._get_random_election_timeout(),
                                         self._election_timeout_handler,
-                                        self._get_random_election_timeout())     
-
+                                        self._get_random_election_timeout())
 
     def run(self):
         self._eventloop.run()

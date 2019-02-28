@@ -76,11 +76,11 @@ class RaftClient():
         return response
 
     def request(self, command):
-        randid = random.randint(0,100000)
-        node_addr = self._get_addr()
+        randid = random.randint(1,10000000000)
 
         for _ in range(self._max_retry):
             try:
+                node_addr = self._get_addr()
                 response = self._request(command, randid, node_addr)
             except socket.timeout as e:
                 logging.debug('id: [%s], [%d] times try, [%s], failed, [%s]' % (randid, _ + 1 , str(node_addr), str(e)))

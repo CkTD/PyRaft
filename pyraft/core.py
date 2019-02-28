@@ -10,7 +10,9 @@ logger = logging.getLogger('raft.core')
 class MemoryLog():
     """ 
     log is a tuple (term, (serial,command))
+    log is a tuple (term, serial, command))
     first log has index 1.
+    no-op entry is (term, (None,None))
     """
     def __init__(self):
         self._l = []
@@ -23,11 +25,11 @@ class MemoryLog():
             raise KeyError("first log index is 1")
         return self._l[index - 1]
 
-    def add(self, entry):
+    def add(self, term, serial_number, command):
         """
         add a new log, return the index of that log.
         """
-        self._l.append(entry)
+        self._l.append((term, serial_number, command))
         return len(self._l)
 
     def contain(self, index, term):
@@ -52,6 +54,17 @@ class MemoryLog():
             return 0
         else:
             return self._l[index - 1][0]
+    
+    def get_serial_number(self, index):
+        if index == 0:
+            raise IndexError("first log has index 1")
+        return self._l[index - 1][1]
+
+    def get_command(self, index):
+        if index == 0:
+            raise IndexError("first log has index 1")
+        return self._l[index - 1][2]
+
 
     def delete_after(self, index):
         """
@@ -136,6 +149,11 @@ class RaftStateMachine():
         self._log_to_client = {}   
         self._get_random_heartbeat_timeout = lambda: random.randint(3, 5)
         self._heartbeat_timeout_id = None
+        self._no_op_index = None
+        self._no_op_committed = False
+        self._devoted_followers = 0
+        self._readonly_request = []        # [(node, serial_number, command),(...), ...]
+        self._on_readonly = None            # handler for readonly request
 
         self._to_follower()  # when servers start up, they begin as followers. 
 
@@ -148,10 +166,13 @@ class RaftStateMachine():
         if len(self._log) == 0:
             return 0
         else:
-            return self._log[len(self._log)][0]
+            return self._log.get_term(self._last_log_index)
         
     def set_on_apply_log(self, callback):
         self._on_apply_log = callback
+
+    def set_on_readonly(self, callback):
+        self._on_readonly = callback
 
     def _to_follower(self):
         """
@@ -170,7 +191,7 @@ class RaftStateMachine():
         
         self._reset_election_timeout()
 
-        if self._heartbeat_timeout_id is not None:
+        if self._heartbeat_timeout_id != None:
             self._eventloop.unregister_time_event(self._heartbeat_timeout_id)
         self._heartbeat_timeout_id = None
     
@@ -184,11 +205,15 @@ class RaftStateMachine():
 
         self._client_nodes = set()
         self._log_to_client = {}
+        self._devoted_followers = 1 # 1 for it self
+        self._no_op_committed = False
+        self._no_op_index = self._log.add(self._current_term, None, None)
+        self._readonly_request = []
         for node in self._peer_nodes:
             self._next_index[node] = self._last_log_index + 1
             self._match_index[node] = 0
         
-        if self._election_timeout_id is not None:
+        if self._election_timeout_id != None:
             self._eventloop.unregister_time_event(self._election_timeout_id)
         self._election_timeout_id = None
         
@@ -217,7 +242,7 @@ class RaftStateMachine():
         self._voted_by = set()
         self._voted_by.add(self._self_node)
 
-        if self._heartbeat_timeout_id is not None:
+        if self._heartbeat_timeout_id != None:
             self._eventloop.unregister_time_event(self._heartbeat_timeout_id)
 
         self._request_vote()
@@ -228,6 +253,7 @@ class RaftStateMachine():
 
     def _heartbeat_timeout_handler(self):
         logger.info("heartbeat timeout, send append entry to all follower.")
+        self._devoted_followers = 1 # reset it
         self._append_entry()
 
     def _on_message_received(self, node, message):
@@ -278,7 +304,7 @@ class RaftStateMachine():
                         logger.info("reject request_vote by [%s]. from old term [%d]." %(node, m_term))
                         self._request_vote_response(node, False)
                         return
-                    if self._voted_for is None and not (
+                    if self._voted_for == None and not (
                         self._last_log_term > m_last_log_term or
                             (self._last_log_term == m_last_log_term and
                             self._last_log_index > m_last_log_index) ):
@@ -286,7 +312,7 @@ class RaftStateMachine():
                         self._request_vote_response(node, True)
                         self._voted_for = node
                     else:
-                        if self._voted_for is not None:
+                        if self._voted_for != None:
                             logger.info("reject request_vote by [%s]. already voted for" %(node, self._voted_for))
                         else:
                             logger.info("reject request_vote by [%s]. that candidate's log is not up-to-date" % node)
@@ -295,7 +321,7 @@ class RaftStateMachine():
                 vote_granted = message['vote_granted']
                 if self._state == NODE_STATE.CANDIDATE:
                     if m_term == self._current_term:
-                        if vote_granted is True:
+                        if vote_granted == True:
                             # a node can vote for only one time in a given term.
                             # now, the response is must for corresponding request.
                             logger.info('voted by [%s]' % node)
@@ -320,7 +346,7 @@ class RaftStateMachine():
                         self._to_follower()
                     
                     # now, we are a follower and know who is leader
-                    if self._leader is None:
+                    if self._leader == None:
                         logger.info('new leader [%s] detected' % node)
                         self._leader = node
                     else:
@@ -330,7 +356,7 @@ class RaftStateMachine():
                     self._reset_election_timeout()
                     
                     # perform the consistency check.
-                    if self._log.contain(m_prev_log_index, m_prev_log_term) is False:
+                    if self._log.contain(m_prev_log_index, m_prev_log_term) == False:
                         logger.info("append_entry: consistency check failed: local log has no entry with index=[%d], term=[%d]" % (m_prev_log_index, m_prev_log_term))
                         self._append_entry_response(node, False, m_prev_log_index + 1)
                         return
@@ -339,22 +365,22 @@ class RaftStateMachine():
                     self._log.delete_after(m_prev_log_index)
 
                     # if heartbeat contain a new entry, add to self log and response to the RPC. 
-                    if m_entry is not None:
+                    if m_entry != None:
                         logger.info("append_entry: received new entry from leader, index:[%d], term:[%d]" %(m_prev_log_index + 1 ,m_term))
-                        self._log.add(m_entry)
+                        self._log.add(*m_entry)
                         ##### !!!!!
                         ##### update on stable storage here before response.
-                        self._append_entry_response(node, True, m_prev_log_index + 1)
                     else:
                         logger.info("append_entry: heartbeat without entry")
+                    self._append_entry_response(node, True, m_prev_log_index + 1)
 
                     # check if leader have committed some log.
                     if m_leader_commit > self._commit_index:
-                        logger.info("append_entry: leader commit is:[%d], local commit: [%d], local_last: [%d]" %(m_leader_commit, self._commit_index, self._last_log_index))
+                        logger.info("append_entry: commit new entry, leader commit: [%d], local commit: [%d], local_last: [%d]" %(m_leader_commit, self._commit_index, self._last_log_index))
                         index = min(m_leader_commit, self._last_log_index)
                         while self._commit_index < index:
                             self._commit_index += 1
-                            self._commit_serial.add(self._log[self._commit_index][1][0])
+                            self._commit_serial.add(self._log.get_serial_number(self._commit_index))
                         self._apply_log()
 
             elif m_type == 'append_entry_response':
@@ -367,14 +393,21 @@ class RaftStateMachine():
                     if m_for_index != self._next_index[node]:
                         logger.info("append_entry_response for previous index. ignore")
                         return
-                    if m_success is True:
+                    # now, the node must be a valid follower.
+                    self._devoted_followers +=1
+                    self._leader_check_readonly_request()
+
+                    if m_success == True:
+                        # if respond to a request without entry, do nothing
+                        if m_for_index > self._last_log_index:
+                            return
                         logger.info("append_entry_response log [%d] replicated to node [%s] sucess" %(m_for_index, node))
                         self._match_index[node] = m_for_index
                         self._next_index[node] += 1
                         self._leader_check_commit()
                     else:
-                        logger.info("append_entry_response failed for node [%s], decrease next_index" %(node))
                         self._next_index[node] -= 1
+                        logger.info("append_entry_response failed for node [%s], decrease next_index to [%d]" %(node, self._next_index[node]))
         
             else:
                 assert False # it's impossible...
@@ -382,6 +415,8 @@ class RaftStateMachine():
         # message from client
         elif node in self._client_nodes:
             if m_type == 'client_request':
+                m_serial_number = message ['serial_number']
+                m_readonly =  message['readonly']
                 m_command = message['command']
                 if self._state == NODE_STATE.LEADER:
                     # if the leader crashes after committing the log entry but before respond-
@@ -393,16 +428,20 @@ class RaftStateMachine():
                     # sociated response. If it receives a command whose serial
                     # number has already been executed, it responds immedi-
                     # ately without re-executing the request.
-                    if m_command[0] in self._commit_serial:
-                        logger.info("client request: command with serial id [%d] .already success in previous" % m_command[0])
-                        self._server_response(node, True, m_command[0])
+                    if m_readonly == True:
+                        self._readonly_request.append((node, m_serial_number, m_command))
+                        self._leader_check_readonly_request()
                     else:
-                        logger.info("client request: add the command to log.")
-                        index = self._log.add((self._current_term, m_command))
-                        self._log_to_client[index] = node
+                        if m_serial_number in self._commit_serial:
+                            logger.info("client request: command with serial id [%d] .already success in previous" % m_serial_number)
+                            self._server_response(node, m_serial_number, True, None)
+                        else:
+                            logger.info("client request: add the command to log.")
+                            index = self._log.add(self._current_term, m_serial_number,m_command)
+                            self._log_to_client[index] = node
                 else:
                     logger.info("client request: redirect client to leader...")
-                    self._server_response(node, False, m_command[0])
+                    self._server_response(node, m_serial_number, False, self._leader)
         
         # bugs in TcpTransport
         else:
@@ -494,21 +533,17 @@ class RaftStateMachine():
             'for_index': for_index
         })
 
-    def _server_response(self, node, success, id):
+    def _server_response(self, node, serial_number, success, data):
         """ invoked by leader to respond client request """
+        message = {
+                'type': 'server_response',
+                'success' : success,
+                'serial_number': serial_number
+            }
         if success:
-            message = {
-                'type': 'server_response',
-                'success' : True,
-                'command_id': id
-            }
+            message['response'] = data
         else:
-            message = {
-                'type': 'server_response',
-                'success': False,
-                'command_id': id,
-                'redirect': self._leader
-            }
+            message['redirect'] = data
         self._transport.send(node, message)
 
     def _leader_check_commit(self):
@@ -520,11 +555,11 @@ class RaftStateMachine():
         then all prior entry are committed indirectly because
         of the Log Matching Property.
         """
-        logger.info("leader check commit")
+        logger.debug("leader check commit...")
         logger.debug("%s" % str(self))
         index = self._last_log_index
         while index > self._commit_index:
-            if self._log[index][0] != self._current_term:
+            if  self._log.get_term(index) != self._current_term:
                 break
             count = 1 # it is always leader's logs
             for node in self._peer_nodes:
@@ -534,16 +569,53 @@ class RaftStateMachine():
                 # commit entrys
                 while self._commit_index != index:
                     self._commit_index +=1
-                    self._commit_serial.add(self._log[self._commit_index][1][0])
+                    self._commit_serial.add(self._log.get_serial_number(self._commit_index))
                     logger.info("commit new log with index [%d]" % self._commit_index)
+                    if self._commit_index == self._no_op_index:
+                        logger.info("no-op log entry committed.")
+                        self._no_op_committed = True
+                        self._leader_check_readonly_request()
                     # response to client the success.
                     if self._commit_index in self._log_to_client:
                         logger.info("respons to client [%s] success" % self._log_to_client[self._commit_index])
-                        self._server_response(self._log_to_client[self._commit_index], True, self._log[self._commit_index][1][0])
+                        self._server_response(self._log_to_client[self._commit_index], 
+                                              self._log.get_serial_number(self._commit_index),
+                                              True,
+                                              None)
                 self._apply_log()
                 break
             index -= 1
     
+    def _leader_check_readonly_request(self):
+        """
+        Read-only operations can be handled without writing
+        anything into the log. However, with no additional mea-
+        sures, this would run the risk of returning stale data, since
+        the leader responding to the request might have been su-
+        perseded by a newer leader of which it is unaware. Lin-
+        earizable reads must not return stale data, and Raft needs
+        two extra precautions to guarantee this without using the
+        log. First, a leader must have the latest information on
+        which entries are committed. The Leader Completeness
+        Property guarantees that a leader has all committed en-
+        tries, but at the start of its term, it may not know which
+        those are. To find out, it needs to commit an entry from
+        its term. Raft handles this by having each leader com-
+        mit a blank no-op entry into the log at the start of its
+        term. Second, a leader must check whether it has been de-
+        posed before processing a read-only request (its informa-
+        tion may be stale if a more recent leader has been elected).
+        Raft handles this by having the leader exchange heart-
+        beat messages with a majority of the cluster before re-
+        sponding to read-only requests.
+        """
+        if self._no_op_committed and self._devoted_followers >= self._majority:
+            for node ,serial_number, command in self._readonly_request:
+                logger.info("handle readonly request [%d]" % serial_number)
+                response = self._on_readonly(command)
+                self._server_response(node, serial_number, True, response)
+            self._readonly_request.clear()
+
     def __str__(self):
         state_d = {
             NODE_STATE.LEADER: "leader",
@@ -565,10 +637,13 @@ class RaftStateMachine():
     def _apply_log(self):
         while self._commit_index > self._last_applied:
             self._last_applied += 1
-            self._on_apply_log(self._log[self._last_applied][1][1])
+            # do nothing for the no-op log entry
+            if self._log.get_serial_number(self._last_applied) == None:
+                continue
+            self._on_apply_log(self._log.get_command(self._last_applied))
 
     def _reset_election_timeout(self):
-        if self._election_timeout_id is not None:
+        if self._election_timeout_id != None:
             self._eventloop.unregister_time_event(self._election_timeout_id)
         self._election_timeout_id = self._eventloop.register_time_event(
                                         self._get_random_election_timeout(),

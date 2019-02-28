@@ -57,7 +57,7 @@ class RaftClient():
                 message = pickle.loads(data)
                 return message
         
-    def _request(self, command, randid, node_addr):
+    def _request(self, command, serial_number,  node_addr, readonly = False):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(self._time_out)
 
@@ -68,32 +68,39 @@ class RaftClient():
 
         message = {
             'type': 'client_request',
-            'command': (randid, command)
+            'serial_number': serial_number,
+            'readonly': readonly,
+            'command': command
         }
         self._send(sock, message)
 
         response =  self._recv(sock)
         return response
 
-    def request(self, command):
-        randid = random.randint(1,10000000000)
+    def request(self, command, readonly):
+        serial_number = random.randint(1,10000000000)
 
         for _ in range(self._max_retry):
             try:
                 node_addr = self._get_addr()
-                response = self._request(command, randid, node_addr)
+                response = self._request(command, serial_number, node_addr, readonly)
             except socket.timeout as e:
-                logging.debug('id: [%s], [%d] times try, [%s], failed, [%s]' % (randid, _ + 1 , str(node_addr), str(e)))
+                logging.debug('id: [%s], [%d] times try, [%s], failed, [%s]' % (serial_number, _ + 1 , str(node_addr), str(e)))
             except OSError as e:
                 if e.errno not in (errno.ECONNREFUSED, errno.ECONNRESET, errno.EPIPE, errno.ENOTCONN):
                     raise e
-                logging.debug('id: [%s], [%d] times try, [%s], failed, [%s]' % (randid, _ + 1 , str(node_addr), geterror(e)))
+                logging.debug('id: [%s], [%d] times try, [%s], failed, [%s]' % (serial_number, _ + 1 , str(node_addr), geterror(e)))
             else:
-                if response['command_id'] == randid:
-                    if response['success'] == True:
-                        logging.debug('id: [%s], [%d] times try, [%s], success' % (randid, _ + 1, str(node_addr)))
-                        return True
+                m_serial_number = response['serial_number']
+                m_success = response['success']
+                if m_serial_number == serial_number:
+                    if m_success == True:
+                        logging.debug('id: [%s], [%d] times try, [%s], success' % (serial_number, _ + 1, str(node_addr)))
+                        if readonly == True:
+                            return response['response']
+                        else:
+                            return True
                     else:
-                        logging.debug('id: [%s], [%d] times try, [%s], redirect to [%s]' % (randid, _ + 1 , str(node_addr),response['redirect']))
+                        logging.debug('id: [%s], [%d] times try, [%s], redirect to [%s]' % (serial_number, _ + 1 , str(node_addr),response['redirect']))
                         self._leader = response['redirect']
         return False

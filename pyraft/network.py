@@ -408,7 +408,7 @@ class TcpTransport():
 
     def _on_incoming_connected_transport(self, conn):
         self._unknown_conn.add(conn)
-        logger.info("TcpTransport: new incoming unknown peer connection [%s]"
+        logger.debug("TcpTransport: new incoming unknown peer connection [%s]"
             % str(conn.remote_addr))
         conn.set_on_disconnected(
             self._on_disconnected_before_initial_message_transport)

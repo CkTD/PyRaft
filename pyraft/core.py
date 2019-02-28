@@ -9,10 +9,9 @@ logger = logging.getLogger('raft.core')
 
 class MemoryLog():
     """ 
-    log is a tuple (term, (serial,command))
-    log is a tuple (term, serial, command))
+    log is a tuple: (term, serial, command))
     first log has index 1.
-    no-op entry is (term, (None,None))
+    no-op entry: (term, None, None)
     """
     def __init__(self):
         self._l = []
@@ -152,7 +151,7 @@ class RaftStateMachine():
         self._no_op_index = None
         self._no_op_committed = False
         self._devoted_followers = 0
-        self._readonly_request = []        # [(node, serial_number, command),(...), ...]
+        self._readonly_request = []         # [(node, serial_number, command),(...), ...]
         self._on_readonly = None            # handler for readonly request
 
         self._to_follower()  # when servers start up, they begin as followers. 

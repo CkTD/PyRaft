@@ -86,7 +86,7 @@ class EventLoop():
     def _get_time_to_nearest_time_event(self):
         now = time.time()
 
-        if len(self._time_events) > 0:
+        if self._time_events:
             fire_time =  self._time_events[0][1]
             if fire_time < now:
                 return 0

@@ -16,6 +16,6 @@ logger.addHandler(sh)
 # fh.setFormatter(formatter)
 # logger.addHandler(fh)
 
-logging.getLogger('raft.network').setLevel(logging.INFO)
+logging.getLogger('raft.network').setLevel(logging.DEBUG)
 logging.getLogger('raft.eventloop').setLevel(logging.INFO)
 logging.getLogger('raft.core').setLevel(logging.INFO)

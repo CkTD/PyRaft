@@ -139,14 +139,14 @@ class RaftStateMachine():
         self._voted_by = set()
 
         # for candidate and follower
-        self._get_random_election_timeout = lambda: random.randint(5, 10)
+        self._get_random_election_timeout = lambda: random.randint(500, 1000)/1000
         self._election_timeout_id = None
 
         # for leader 
         # log index -> client
         # which client request the log? response that client after the log is committed 
         self._log_to_client = {}   
-        self._get_random_heartbeat_timeout = lambda: random.randint(3, 5)
+        self._get_random_heartbeat_timeout = lambda: random.randint(200, 400)/1000
         self._heartbeat_timeout_id = None
         self._no_op_index = None
         self._no_op_committed = False

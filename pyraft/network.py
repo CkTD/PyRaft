@@ -450,7 +450,10 @@ class TcpTransport():
 
     def _on_disconnected_transport(self, conn):
         logger.info("TcpTransport: node disconnected [%s]"%self._conn_to_node(conn))
-        self._on_node_disconnected_raft(self._conn_to_node(conn))
+        node = self._conn_to_node(conn)
+        if node not in self._peer_nodes:
+            del self._node_to_conn[node]
+        self._on_node_disconnected_raft(node)
 
     def _on_message_received_transport(self, conn, message):
         self._on_message_received_raft(self._conn_to_node(conn), message)

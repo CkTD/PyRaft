@@ -94,9 +94,9 @@ class RaftClient():
                 m_serial_number = response['serial_number']
                 m_success = response['success']
                 if m_serial_number == serial_number:
-                    if m_success == True:
+                    if m_success:
                         logging.debug('id: [%s], [%d] times try, [%s], success' % (serial_number, _ + 1, str(node_addr)))
-                        if readonly == True:
+                        if readonly:
                             return response['response']
                         else:
                             return True

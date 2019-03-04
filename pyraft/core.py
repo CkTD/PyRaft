@@ -162,7 +162,7 @@ class RaftStateMachine():
 
     @property
     def _last_log_term(self):
-        if len(self._log) == 0:
+        if not self._log:
             return 0
         else:
             return self._log.get_term(self._last_log_index)
@@ -190,7 +190,7 @@ class RaftStateMachine():
         
         self._reset_election_timeout()
 
-        if self._heartbeat_timeout_id != None:
+        if self._heartbeat_timeout_id is not None:
             self._eventloop.unregister_time_event(self._heartbeat_timeout_id)
         self._heartbeat_timeout_id = None
     
@@ -212,7 +212,7 @@ class RaftStateMachine():
             self._next_index[node] = self._last_log_index + 1
             self._match_index[node] = 0
         
-        if self._election_timeout_id != None:
+        if self._election_timeout_id is not None:
             self._eventloop.unregister_time_event(self._election_timeout_id)
         self._election_timeout_id = None
         
@@ -241,7 +241,7 @@ class RaftStateMachine():
         self._voted_by = set()
         self._voted_by.add(self._self_node)
 
-        if self._heartbeat_timeout_id != None:
+        if self._heartbeat_timeout_id is not None:
             self._eventloop.unregister_time_event(self._heartbeat_timeout_id)
 
         self._request_vote()
@@ -303,7 +303,7 @@ class RaftStateMachine():
                         logger.info("reject request_vote by [%s]. from old term [%d]." %(node, m_term))
                         self._request_vote_response(node, False)
                         return
-                    if self._voted_for == None and not (
+                    if self._voted_for is None and not (
                         self._last_log_term > m_last_log_term or
                             (self._last_log_term == m_last_log_term and
                             self._last_log_index > m_last_log_index) ):
@@ -311,7 +311,7 @@ class RaftStateMachine():
                         self._request_vote_response(node, True)
                         self._voted_for = node
                     else:
-                        if self._voted_for != None:
+                        if self._voted_for is not None:
                             logger.info("reject request_vote by [%s]. already voted for" %(node, self._voted_for))
                         else:
                             logger.info("reject request_vote by [%s]. that candidate's log is not up-to-date" % node)
@@ -320,7 +320,7 @@ class RaftStateMachine():
                 vote_granted = message['vote_granted']
                 if self._state == NODE_STATE.CANDIDATE:
                     if m_term == self._current_term:
-                        if vote_granted == True:
+                        if vote_granted:
                             # a node can vote for only one time in a given term.
                             # now, the response is must for corresponding request.
                             logger.info('voted by [%s]' % node)
@@ -355,7 +355,7 @@ class RaftStateMachine():
                     self._reset_election_timeout()
                     
                     # perform the consistency check.
-                    if self._log.contain(m_prev_log_index, m_prev_log_term) == False:
+                    if not self._log.contain(m_prev_log_index, m_prev_log_term):
                         logger.info("append_entry: consistency check failed: local log has no entry with index=[%d], term=[%d]" % (m_prev_log_index, m_prev_log_term))
                         self._append_entry_response(node, False, m_prev_log_index + 1)
                         return
@@ -364,7 +364,7 @@ class RaftStateMachine():
                     self._log.delete_after(m_prev_log_index)
 
                     # if heartbeat contain a new entry, add to self log and response to the RPC. 
-                    if m_entry != None:
+                    if m_entry is not None:
                         logger.info("append_entry: received new entry from leader, index:[%d], term:[%d]" %(m_prev_log_index + 1 ,m_term))
                         self._log.add(*m_entry)
                         ##### !!!!!
@@ -396,7 +396,7 @@ class RaftStateMachine():
                     self._devoted_followers +=1
                     self._leader_check_readonly_request()
 
-                    if m_success == True:
+                    if m_success:
                         # if respond to a request without entry, do nothing
                         if m_for_index > self._last_log_index:
                             return
@@ -637,12 +637,12 @@ class RaftStateMachine():
         while self._commit_index > self._last_applied:
             self._last_applied += 1
             # do nothing for the no-op log entry
-            if self._log.get_serial_number(self._last_applied) == None:
+            if self._log.get_serial_number(self._last_applied) is None:
                 continue
             self._on_apply_log(self._log.get_command(self._last_applied))
 
     def _reset_election_timeout(self):
-        if self._election_timeout_id != None:
+        if self._election_timeout_id is not None:
             self._eventloop.unregister_time_event(self._election_timeout_id)
         self._election_timeout_id = self._eventloop.register_time_event(
                                         self._get_random_election_timeout(),

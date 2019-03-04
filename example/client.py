@@ -16,7 +16,7 @@ for _ in range(10):
         'args': [10]
     }
     res = client.request(message, readonly = False)
-    if res != True:
+    if not res:
         break
     print("add_counter success.")
 

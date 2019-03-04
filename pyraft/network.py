@@ -102,7 +102,7 @@ class TcpConnection():
         try:
             self._socket.connect((host, port))
         except socket.error as e:
-            if e.errno is not socket.errno.EINPROGRESS:
+            if e.errno != socket.errno.EINPROGRESS:
                 logger.error("  TcpConnection: [%s]" % geterror(e))
                 return False
             #logger.debug("  TcpConnection: [%s]" % geterror(e))
@@ -133,7 +133,7 @@ class TcpConnection():
         self._last_active = time.time()
         self._eventloop.unregister_file_event(self._fileno)
         event_mask = EVENT_TYPE.READ | EVENT_TYPE.ERROR
-        if len(self._write_buffer) > 0:
+        if self._write_buffer:
             event_mask |= EVENT_TYPE.WRITE
 
         self._eventloop.register_file_event(self._fileno, event_mask, self._process_event)
@@ -190,7 +190,7 @@ class TcpConnection():
                 return
 
             event_mask = EVENT_TYPE.READ | EVENT_TYPE.ERROR
-            if len(self._write_buffer) > 0:
+            if self._write_buffer:
                 event_mask |= EVENT_TYPE.WRITE
             self._eventloop.modify(self._fileno, event_mask)
 
@@ -209,7 +209,7 @@ class TcpConnection():
 
     def _do_write(self):
         while True:
-            if len(self._write_buffer) == 0:
+            if not self._write_buffer:
                 break
             try:
                 res = self._socket.send(self._write_buffer)
@@ -385,7 +385,7 @@ class TcpTransport():
     def _check_peers_connection(self):
         logger.debug("TcpTransport: now, check connections.")
         for node in self._peer_nodes:
-            if self._node_to_conn[node].state is not TCP_CONNECTION_STATE.DISCONNECTED:
+            if self._node_to_conn[node].state != TCP_CONNECTION_STATE.DISCONNECTED:
                 continue
             if time.time() - self._last_connect_attempt[node] < self._connect_retry_interval:
                 continue
@@ -460,10 +460,10 @@ class TcpTransport():
 
     def send(self, node, message):
         if node not in self._node_to_conn or \
-           self._node_to_conn[node].state is not TCP_CONNECTION_STATE.CONNECTED:
+           self._node_to_conn[node].state != TCP_CONNECTION_STATE.CONNECTED:
             return False
         self._node_to_conn[node].send(message)
-        if self._node_to_conn[node].state is not TCP_CONNECTION_STATE.CONNECTED:
+        if self._node_to_conn[node].state != TCP_CONNECTION_STATE.CONNECTED:
             return False
         return True
 

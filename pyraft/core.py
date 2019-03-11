@@ -1,6 +1,9 @@
+# -*- coding: utf-8 -*-
+
 import random
 import logging
 
+from .config import get_config, init_log
 from .network import TcpTransport
 from .network import EventLoop, EVENT_TYPE
 
@@ -70,6 +73,10 @@ class MemoryLog():
         delete all logs having index > index
         """
         self._l = self._l[:index]
+    
+    def get(self, start, length):
+        """ return at most #length logs, firest log having index = start"""
+        return self._l[start - 1:start - 1 + length]
 
 
 class PersistLog():
@@ -82,18 +89,21 @@ class NODE_STATE:
     LEADER = 2
 
 class RaftStateMachine():
-    def __init__(self, self_node, peer_nodes):
+    def __init__(self, args):
+        self._config = get_config(args)
+        init_log(self._config)
+
         # "host:port" for this node, it's id
-        self._self_node = self_node
+        self._self_node = self._config['self_node']
         # list of "host:port" for raft peer nodes, peer's ids
-        self._peer_nodes = set(peer_nodes)
+        self._peer_nodes = set(self._config['peer_nodes'])
         
-        if (len(peer_nodes) + 1) % 2 == 0:
+        if (len(self._peer_nodes) + 1) % 2 == 0:
             raise ValueError("number of node in cluster should be odd")
-        self._majority = (len(peer_nodes) + 1 + 1) // 2 
+        self._majority = (len(self._peer_nodes) + 1 + 1) // 2 
 
         self._eventloop = EventLoop()
-        self._transport = TcpTransport(self_node, peer_nodes, 
+        self._transport = TcpTransport(self._config,
                                        self._eventloop)
         self._transport.set_on_message_received(self._on_message_received)
         self._transport.set_on_node_connected(self._on_node_connected)
@@ -139,20 +149,27 @@ class RaftStateMachine():
         self._voted_by = set()
 
         # for candidate and follower
-        self._get_random_election_timeout = lambda: random.randint(500, 1000)/1000
+        self._get_random_election_timeout = lambda: random.randint(
+                                            self._config['election_timeout_min'],
+                                            self._config['election_timeout_max'])/1000
         self._election_timeout_id = None
 
         # for leader 
         # log index -> client
         # which client request the log? response that client after the log is committed 
         self._log_to_client = {}   
-        self._get_random_heartbeat_timeout = lambda: random.randint(200, 400)/1000
+        self._get_random_heartbeat_timeout = lambda: random.randint(
+                                            self._config['heartbeat_timeout_min'], 
+                                            self._config['heartbeat_timeout_max'])/1000
         self._heartbeat_timeout_id = None
         self._no_op_index = None
         self._no_op_committed = False
         self._devoted_followers = 0
         self._readonly_request = []         # [(node, serial_number, command),(...), ...]
         self._on_readonly = None            # handler for readonly request
+        # max number of entries in a single append entries request
+        self._max_entries_per_call = self._config['max_log_entries_per_call']
+        self._expected_next_index = {}
 
         self._to_follower()  # when servers start up, they begin as followers. 
 
@@ -253,7 +270,7 @@ class RaftStateMachine():
     def _heartbeat_timeout_handler(self):
         logger.info("heartbeat timeout, send append entry to all follower.")
         self._devoted_followers = 1 # reset it
-        self._append_entry()
+        self._append_entries()
 
     def _on_message_received(self, node, message):
         """ process incoming request
@@ -312,7 +329,7 @@ class RaftStateMachine():
                         self._voted_for = node
                     else:
                         if self._voted_for is not None:
-                            logger.info("reject request_vote by [%s]. already voted for" %(node, self._voted_for))
+                            logger.info("reject request_vote by [%s]. already voted for [%s]" %(node, self._voted_for))
                         else:
                             logger.info("reject request_vote by [%s]. that candidate's log is not up-to-date" % node)
 
@@ -328,16 +345,16 @@ class RaftStateMachine():
                             if len(self._voted_by) >= self._majority:
                                 self._to_leader()
 
-            elif m_type == 'append_entry':
+            elif m_type == 'append_entries':
                 m_leader_id = message['leader_id']
                 m_prev_log_index = message['prev_log_index']
                 m_prev_log_term = message['prev_log_term']
-                m_entry = message['entry']
+                m_entries = message['entries']
                 m_leader_commit = message['leader_commit']
                 if self._state in (NODE_STATE.CANDIDATE, NODE_STATE.FOLLOWER):
                     if m_term != self._current_term:
                         logger.info('reject append_entry from old term[%d].'% m_term)
-                        self._append_entry_response(node, False)
+                        self._append_entries_response(node, False, 0)
                         return
                     # candidate find there is already a leader for this term.
                     if self._state == NODE_STATE.CANDIDATE:
@@ -356,41 +373,42 @@ class RaftStateMachine():
                     
                     # perform the consistency check.
                     if not self._log.contain(m_prev_log_index, m_prev_log_term):
-                        logger.info("append_entry: consistency check failed: local log has no entry with index=[%d], term=[%d]" % (m_prev_log_index, m_prev_log_term))
-                        self._append_entry_response(node, False, m_prev_log_index + 1)
+                        logger.info("append_entries: consistency check failed: local log has no entry with index=[%d], term=[%d]" % (m_prev_log_index, m_prev_log_term))
+                        self._append_entries_response(node, False, m_prev_log_index + len(m_entries) + 1)
                         return
 
                     # delete the entry conflicting to leader 
                     self._log.delete_after(m_prev_log_index)
 
                     # if heartbeat contain a new entry, add to self log and response to the RPC. 
-                    if m_entry is not None:
-                        logger.info("append_entry: received new entry from leader, index:[%d], term:[%d]" %(m_prev_log_index + 1 ,m_term))
-                        self._log.add(*m_entry)
+                    if m_entries:
+                        logger.info("append_entries: received [%d] entries from leader, index:[%d], term:[%d]" %(len(m_entries), m_prev_log_index + 1 ,m_term))
+                        for m_entry in m_entries:
+                            self._log.add(*m_entry)
                         ##### !!!!!
                         ##### update on stable storage here before response.
                     else:
-                        logger.info("append_entry: heartbeat without entry")
-                    self._append_entry_response(node, True, m_prev_log_index + 1)
+                        logger.info("append_entries: heartbeat without entry")
+                    self._append_entries_response(node, True, self._last_log_index + 1)
 
                     # check if leader have committed some log.
                     if m_leader_commit > self._commit_index:
-                        logger.info("append_entry: commit new entry, leader commit: [%d], local commit: [%d], local_last: [%d]" %(m_leader_commit, self._commit_index, self._last_log_index))
+                        logger.info("append_entries: commit new entry, leader commit: [%d], local commit: [%d], local_last: [%d]" %(m_leader_commit, self._commit_index, self._last_log_index))
                         index = min(m_leader_commit, self._last_log_index)
                         while self._commit_index < index:
                             self._commit_index += 1
                             self._commit_serial.add(self._log.get_serial_number(self._commit_index))
                         self._apply_log()
 
-            elif m_type == 'append_entry_response':
+            elif m_type == 'append_entries_response':
                 m_success = message['success']
-                m_for_index = message['for_index']
+                m_next = message['next']
                 if self._state == NODE_STATE.LEADER:
                     if m_term != self._current_term:
-                        logger.info("append_entry_response for old term. ignore")
+                        logger.info("append_entries_response for old term. ignore")
                         return
-                    if m_for_index != self._next_index[node]:
-                        logger.info("append_entry_response for previous index. ignore")
+                    if m_next != self._expected_next_index[node]:
+                        logger.info("append_entries_response for previous index. ignore")
                         return
                     # now, the node must be a valid follower.
                     self._devoted_followers +=1
@@ -398,15 +416,15 @@ class RaftStateMachine():
 
                     if m_success:
                         # if respond to a request without entry, do nothing
-                        if m_for_index > self._last_log_index:
+                        if m_next == self._next_index[node]:
                             return
-                        logger.info("append_entry_response log [%d] replicated to node [%s] sucess" %(m_for_index, node))
-                        self._match_index[node] = m_for_index
-                        self._next_index[node] += 1
+                        logger.info("append_entries_response log [%d] replicated to node [%s] sucess" %(m_next - 1, node))
+                        self._match_index[node] = m_next - 1 
+                        self._next_index[node] = self._expected_next_index[node]
                         self._leader_check_commit()
                     else:
                         self._next_index[node] -= 1
-                        logger.info("append_entry_response failed for node [%s], decrease next_index to [%d]" %(node, self._next_index[node]))
+                        logger.info("append_entries_response failed for node [%s], decrease next_index to [%d]" %(node, self._next_index[node]))
         
             else:
                 assert False # it's impossible...
@@ -441,6 +459,9 @@ class RaftStateMachine():
                 else:
                     logger.info("client request: redirect client to leader...")
                     self._server_response(node, m_serial_number, False, self._leader)
+            
+            else:
+                assert False # it's impossible...
         
         # bugs in TcpTransport
         else:
@@ -492,44 +513,41 @@ class RaftStateMachine():
             'vote_granted' : vote_granted
         })
 
-    def _append_entry(self):
+    def _append_entries(self):
         """ invoked by leader to replicated log entry, 
         also used as heartbeat """
         for node in self._peer_nodes:
             next_to_send = self._next_index[node]
             prev_log_index = next_to_send - 1
             prev_log_term = self._log.get_term(prev_log_index)
-            if self._last_log_index >= next_to_send:
-                entry = self._log[next_to_send]
-            else:
-                entry = None
+
+            entries = self._log.get(next_to_send, self._max_entries_per_call)
+            self._expected_next_index[node] = next_to_send + len(entries)
 
             message = {
-                'type': 'append_entry',
+                'type': 'append_entries',
                 'term': self._current_term,
                 'leader_id': self._self_node,
                 'prev_log_index': prev_log_index,
                 'prev_log_term': prev_log_term,
-                'entry': entry,
+                'entries': entries,
                 'leader_commit': self._commit_index
             }
             self._transport.send(node, message)
 
-    def _append_entry_response(self, node, success, for_index):
+    def _append_entries_response(self, node, success, next):
         """ 
-        invoked by follower of candidate response append_entry request.
-        without RPC, several response to one log cause error on leader
-        so, for an append_entry requese, alway add for_index to the response to let 
-        the leader check if the response is for the corresponding request.
-
-        for_index is (pre_log_index + 1), which is also leader's next_index for this node  
-        the leader just check for_index == next_index to ignore duplicated response for same log 
+        invoked by follower to respond append_entry request.
+        without RPC, several response to one request cause error on 
+        leader. Always add 'next' (leader's expected_next_index for 
+        this node) to the response, and the leader can check if the
+        response is for the corresponding request.
         """
         self._transport.send(node, {
-            'type': 'append_entry_response',
+            'type': 'append_entries_response',
             'term': self._current_term,
             'success': success,
-            'for_index': for_index
+            'next': next
         })
 
     def _server_response(self, node, serial_number, success, data):

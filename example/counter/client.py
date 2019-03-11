@@ -1,6 +1,8 @@
+# -*- coding: utf-8 -*-
+
 import sys
 
-sys.path.append("../")
+sys.path.append("../../")
 from pyraft.client import RaftClient
 
 localhost = "127.0.0.1"

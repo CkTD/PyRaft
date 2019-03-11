@@ -1,3 +1,5 @@
+# -*- coding: utf-8 -*-
+
 import time
 import socket
 import struct
@@ -31,9 +33,7 @@ class TCP_CONNECTION_STATE:
 
 class TcpConnection():
     """ non blocking Tcp connection """
-    def __init__(self, eventloop, socket=None, 
-                 send_buffer_size=2 ** 13, 
-                 recv_buffer_size=2 ** 13):
+    def __init__(self, config, eventloop, socket=None):
         self._eventloop = eventloop
         self._socket = socket
         self._remote = None
@@ -56,8 +56,8 @@ class TcpConnection():
                 self._fileno, EVENT_TYPE.READ | EVENT_TYPE.ERROR, 
                 self._process_event)
 
-        self._send_buffer_size = send_buffer_size
-        self._recv_buffer_size = recv_buffer_size
+        self._send_buffer_size = config['send_buffer_size']
+        self._recv_buffer_size = config['recv_buffer_size']
         self._on_connected_transport = None
         self._on_disconnected_transport = None
         self._on_message_received_transport = None
@@ -123,11 +123,11 @@ class TcpConnection():
         err = self._socket.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
         if err != 0:
             logger.debug("TcpConnection: failed connect to [%s],  [%s]"
-                % (self.remote_addr, geterror(err)))
+                % (str(self.remote_addr), geterror(err)))
             self.disconnect()
             return
 
-        logger.debug("TcpConnection: successfully connect to [%s],  [%s]")
+        logger.debug("TcpConnection: successfully connect to [%s]" % str(self.remote_addr))
 
         self._state = TCP_CONNECTION_STATE.CONNECTED
         self._last_active = time.time()
@@ -265,15 +265,14 @@ class TCP_SERVER_STATE:
 
 class TcpServer():
     """ non blocking Tcp Server """
-    def __init__(self, host, port,
-        eventloop, on_connected_transport,
-        send_buffer_size=2 ** 13,
-        recv_buffer_size=2 ** 13):
+    def __init__(self, config, host, port,
+        eventloop, on_connected_transport):
+        self._config = config
         self._host = host
         self._port = port
         self._eventloop = eventloop
-        self._send_buffer_size = send_buffer_size
-        self._recv_buffer_size = recv_buffer_size
+        self._send_buffer_size = self._config['send_buffer_size']
+        self._recv_buffer_size = self._config['recv_buffer_size']
         self._socket = None
         self._fileno = None
         self._state = TCP_SERVER_STATE.UNBINDED
@@ -322,7 +321,7 @@ class TcpServer():
                             self._recv_buffer_size)
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             sock.setblocking(0)
-            conn = TcpConnection(self._eventloop, socket=sock)
+            conn = TcpConnection(self._config, self._eventloop, socket=sock)
             self._on_connected_transport(conn)
 
     def destory(self):
@@ -337,8 +336,9 @@ class TcpServer():
 #########    TcpTransport  #########################
 ####################################################
 class TcpTransport():
-    def __init__(self, self_node, peer_nodes, eventloop, connect_retry_interval=5):
-        self._self_node = self_node
+    def __init__(self, config, eventloop):
+        self._config = config
+        self._self_node = self._config['self_node']
         self._peer_nodes = set() # node is "host:port" for that node's tcp server's bind address(peer's id)
 
         self._node_to_conn = {}  # node -> TCPconnection
@@ -346,16 +346,17 @@ class TcpTransport():
         self._unknown_conn = set()
 
         self._last_connect_attempt = {}
-        self._connect_retry_interval = connect_retry_interval
+        self._connect_retry_interval = self._config['connect_retry_interval']
         self._server = None
         self._eventloop = eventloop
-        self._eventloop.register_time_event(connect_retry_interval,self._check_peers_connection, period=connect_retry_interval)
-
+        self._eventloop.register_time_event(self._connect_retry_interval,
+                                            self._check_peers_connection, 
+                                            period=self._connect_retry_interval)
         self._on_message_received_raft = None
         self._on_node_connected_raft = None
         self._on_node_disconnected_raft = None
 
-        for node in peer_nodes:
+        for node in self._config['peer_nodes']:
             self._add_peer_node(node)
 
         self._create_server()
@@ -376,7 +377,7 @@ class TcpTransport():
         self._on_node_disconnected_raft = callback
 
     def _add_peer_node(self, node):
-        conn = TcpConnection(self._eventloop)
+        conn = TcpConnection(self._config, self._eventloop)
 
         self._peer_nodes.add(node)
         self._last_connect_attempt[node] = 0
@@ -402,7 +403,7 @@ class TcpTransport():
 
     def _create_server(self):
         host, port = self._self_node.split(":")
-        self._server = TcpServer(
+        self._server = TcpServer(self._config,
             host, int(port), self._eventloop, self._on_incoming_connected_transport
         )
 

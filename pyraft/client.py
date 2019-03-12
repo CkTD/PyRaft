@@ -80,7 +80,7 @@ class RaftClient():
         return response
 
     def request(self, command, readonly):
-        serial_number = random.randint(1,10000000000)
+        serial_number = random.randrange(1,2**32)
 
         for _ in range(self._max_retry):
             try:

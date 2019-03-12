@@ -2,19 +2,23 @@
 
 import random
 import logging
+import signal
+import os
+import struct 
+import pickle
 
 from .config import get_config, init_log
 from .network import TcpTransport
-from .network import EventLoop, EVENT_TYPE
+from .network import EventLoop
 
 
 logger = logging.getLogger('raft.core')
 
 class MemoryLog():
     """ 
-    log is a tuple: (term, serial, command))
+    log is a tuple: (term, serial, command)
     first log has index 1.
-    no-op entry: (term, None, None)
+    no-op entry: (term, 0, None)
     """
     def __init__(self):
         self._l = []
@@ -67,21 +71,170 @@ class MemoryLog():
             raise IndexError("first log has index 1")
         return self._l[index - 1][2]
 
-
     def delete_after(self, index):
         """
         delete all logs having index > index
         """
         self._l = self._l[:index]
     
-    def get(self, start, length):
+    def get(self, start, length = 1):
         """ return at most #length logs, firest log having index = start"""
         return self._l[start - 1:start - 1 + length]
 
-
+import stat
 class PersistLog():
-    def __init__(self):
-        raise NotImplementedError
+    """ 
+    log is a tuple: (term, serial, command)
+    first log has index 1.
+    no-op entry: (term, 0, None)
+
+    File Formate
+    one record for a log is:
+    length1,log1(index, term, serial, command),length1, .....
+    """
+    def __init__(self, file):
+        self._fd = os.open(file, os.O_RDWR | os.O_CREAT, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IWGRP | stat.S_IROTH)
+        self._last_index = 0
+        
+        res = self._get_by_offset(self._file_length, True) # get last record
+        if res:
+            self._last_index = res[0][0]
+    
+    @property
+    def _file_length(self):
+        return os.lseek(self._fd,0,os.SEEK_END)
+    
+    def _write(self, content):
+        os.lseek(self._fd,0,os.SEEK_END)
+        return os.write(self._fd, content)
+
+    def _get_by_offset(self, offset, back = False):        
+        if back:
+            if offset == 0:
+                return None
+            offset -= 4
+            os.lseek(self._fd, offset, os.SEEK_SET)
+            length = os.read(self._fd, 4)
+            length = struct.unpack("I", length)[0]
+            offset -= length
+            os.lseek(self._fd, offset, os.SEEK_SET)
+            content = os.read(self._fd, length)
+            index, term, serial_number = struct.unpack("III", content[:12])
+            command = pickle.loads(content[12:])
+            offset -=4
+        else:
+            if offset == self._file_length:
+                return None
+            os.lseek(self._fd, offset, os.SEEK_SET)
+            length = os.read(self._fd, 4)
+            length = struct.unpack("I", length)[0]
+            content = os.read(self._fd, length)
+            index, term, serial_number = struct.unpack("III", content[:12])
+            command = pickle.loads(content[12:])
+            offset += 4 + length + 4
+        
+        return (index, term, serial_number, command) , offset
+
+    def _get_by_index(self, index):
+        if index > self._last_index:
+            raise IndexError("Try to get #%d, but last is %d" %(index, self._last_index))
+        offset = self._file_length
+        while True:
+            res = self._get_by_offset(offset, True)
+            assert res is not None # bad log file or bug
+            record , offset = res
+            if record[0] == index:
+                return record[1:]
+        assert False  # bad log file or bug
+
+    def __len__(self):
+        return self._last_index
+
+    def __getitem__(self, index):
+        if index <= 0:
+            raise KeyError("first log index is 1")
+        return self._get_by_index(index)
+
+    def add(self, term ,serial_number, command):
+        self._last_index += 1
+
+        b_command = pickle.dumps(command)
+        b_index = struct.pack("I", self._last_index)
+        b_term = struct.pack("I", term)
+        b_serial_number = struct.pack("I", serial_number)
+        b_length = struct.pack("I", 4 + 4 + 4 + len(b_command))
+
+        record = b_length + b_index + b_term + b_serial_number + b_command + b_length
+        self._write(record)
+
+        return self._last_index
+
+    def contain(self, index, term):
+        """
+        return True if there exist a log with index=index, term=term
+        if index == 0, always return True
+        """
+        if index == 0:
+            return True
+        if self._last_index < index:
+            return False
+        if self.get_term(index) == term:
+            return True
+        return False
+
+    def get_term(self, index):
+        if index == 0:
+            return 0
+        else:
+            return self._get_by_index(index)[0]
+    
+    def get_serial_number(self, index):
+        if index == 0:
+            raise IndexError("first log has index 1")
+        return self._get_by_index(index)[1]
+
+    def get_command(self, index):
+        if index == 0:
+            raise IndexError("first log has index 1")
+        return self._get_by_index(index)[2]
+
+    def delete_after(self, index):
+        """
+        delete all logs having index > index
+        """
+        if index >= self._last_index:
+            return False
+
+        offset = 0
+        while True:
+            res = self._get_by_offset(offset)
+            assert res is not None # bad log file or bug
+            record , offset = res
+            if record[0] == index:
+                os.ftruncate(self._fd, offset)
+                self._last_index = index
+                return True
+        assert False  # bad log file or bug
+
+    def get(self, start, length = 1):
+        """ return at most #length logs, firest log having index = start"""
+        # wast so many time here...
+        logs = []
+        for _ in range(length):
+            if start > self._last_index:
+                break
+            logs.append(self._get_by_index(start)) 
+            start += 1
+        return logs
+
+    def flush(self):
+        os.fsync(self._fd)
+
+    def destory(self):
+        if self._fd:
+            os.fsync(self._fd)
+            os.close(self._fd)
+            self._fd = None
 
 class NODE_STATE:
     FOLLOWER = 0
@@ -119,7 +272,11 @@ class RaftStateMachine():
         # log entry, each entry contains command for state machine and 
         # term when entry was received by leader
         # first index is 1
-        self._log = MemoryLog()
+        if self._config['raft_log_file']:
+            self._log = PersistLog(self._config['raft_log_file'] + ".log")
+            self._load_state()
+        else:
+            self._log = MemoryLog()
 
         ### volatile state on all servers ###
         # index of highest log entry known to be committed
@@ -183,7 +340,23 @@ class RaftStateMachine():
             return 0
         else:
             return self._log.get_term(self._last_log_index)
+
+    def _load_state(self):
+        filename = self._config['raft_log_file'] + ".state"
+        if os.path.isfile(filename):
+            term, votefor = open(filename, "r").read().split(" ")
+            self._current_term = int(term)
+            self._voted_for = votefor
         
+    def _do_persist(self):
+        if isinstance(self._log, PersistLog):
+            filename = self._config['raft_log_file'] + ".state"
+            self._log.flush()
+            f = open(filename, "w")
+            f.write(" ".join((str(self._current_term), str(self._voted_for))))
+            f.flush()
+            f.close()
+
     def set_on_apply_log(self, callback):
         self._on_apply_log = callback
 
@@ -223,7 +396,7 @@ class RaftStateMachine():
         self._log_to_client = {}
         self._devoted_followers = 1 # 1 for it self
         self._no_op_committed = False
-        self._no_op_index = self._log.add(self._current_term, None, None)
+        self._no_op_index = self._log.add(self._current_term, 0, None)
         self._readonly_request = []
         for node in self._peer_nodes:
             self._next_index[node] = self._last_log_index + 1
@@ -326,6 +499,7 @@ class RaftStateMachine():
                             self._last_log_index > m_last_log_index) ):
                         logger.info("vote for %s" % node)
                         self._request_vote_response(node, True)
+                        self._do_persist()
                         self._voted_for = node
                     else:
                         if self._voted_for is not None:
@@ -385,8 +559,7 @@ class RaftStateMachine():
                         logger.info("append_entries: received [%d] entries from leader, index:[%d], term:[%d]" %(len(m_entries), m_prev_log_index + 1 ,m_term))
                         for m_entry in m_entries:
                             self._log.add(*m_entry)
-                        ##### !!!!!
-                        ##### update on stable storage here before response.
+                        self._do_persist()
                     else:
                         logger.info("append_entries: heartbeat without entry")
                     self._append_entries_response(node, True, self._last_log_index + 1)
@@ -655,7 +828,7 @@ class RaftStateMachine():
         while self._commit_index > self._last_applied:
             self._last_applied += 1
             # do nothing for the no-op log entry
-            if self._log.get_serial_number(self._last_applied) is None:
+            if not self._log.get_serial_number(self._last_applied):
                 continue
             self._on_apply_log(self._log.get_command(self._last_applied))
 
@@ -668,5 +841,12 @@ class RaftStateMachine():
                                         self._get_random_election_timeout())
 
     def run(self):
+        def handler(signum, _):
+            logger.info("Signal [%d] received. stop eventloop..." % signum)
+            self._do_persist()
+            self._eventloop.stop()
+        signal.signal(signal.SIGINT, handler)
+        signal.signal(signal.SIGTERM, handler)
+
         self._eventloop.run()
 

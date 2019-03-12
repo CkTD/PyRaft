@@ -17,6 +17,7 @@ OPTION
     heartbeat_timeout_min     2000    in milliseconds
     heartbeat_timeout_max     4000    in milliseconds
     max_log_entries_per_call  10
+    raft_log_file             NONE
   network
     connect_retry_interval    5       in seconds
     send_buffer_size          2**13   in bytes
@@ -36,7 +37,7 @@ def get_config(args):
     """
     shortopts = 'h'
     longopts = ['election_timeout_min=','election_timeout_max=','heartbeat_timeout_min=','heartbeat_timeout_max=',
-                'max_log_entries_per_call=','connect_retry_interval=','send_buffer_size=','recv_buffer_size=',
+                'max_log_entries_per_call=','raft_log_file=','connect_retry_interval=','send_buffer_size=','recv_buffer_size=',
                 'log_file=', 'log_level_core=','log_level_network=', 'help']
     try:
         optlist, args = getopt.getopt(args, shortopts, longopts)
@@ -51,6 +52,7 @@ def get_config(args):
         'heartbeat_timeout_min': 2000,   # in milliseconds
         'heartbeat_timeout_max': 4000,   # in milliseconds
         'max_log_entries_per_call': 10,
+        'raft_log_file': None,           # use MemLog if None else PersistLog
         # network
         'connect_retry_interval': 5,     # in seconds
         'send_buffer_size': 2**13,# in bytes
@@ -74,6 +76,8 @@ def get_config(args):
             config['heartbeat_timeout_min'] = int(value)
         elif key == '--max_log_entries_per_call':
             config['max_log_entries_per_call'] = int(value)
+        elif key == '--raft_log_file':
+            config['raft_log_file'] = value
         elif key == '--connect_retry_interval':
             config['connect_retry_interval'] =int(value)
         elif key == '--send_buffer_size':

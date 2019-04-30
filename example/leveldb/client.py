@@ -12,7 +12,7 @@ node_addrs = [":".join((localhost, node_port)) for node_port in node_ports]
 client = RaftClient(node_addrs)
 
 
-for i in range(10):
+for i in range(2):
     message = {
         'type': "put",
         'args': {'key':bytes("key_%d"%i, 'utf-8'),
@@ -25,7 +25,7 @@ for i in range(10):
         print("put key %d success." % i)
 
 
-for i in range(10):
+for i in range(2):
     message = {
         'type': "get",
         'args': {'key':bytes("key_%d"%i, 'utf-8')}

@@ -3,6 +3,7 @@
 import random
 import logging
 import signal
+import time
 import os
 import struct 
 import pickle
@@ -228,6 +229,7 @@ class PersistLog():
         return logs
 
     def flush(self):
+        return
         os.fsync(self._fd)
 
     def destory(self):
@@ -329,6 +331,13 @@ class RaftStateMachine():
         self._expected_next_index = {}
 
         self._to_follower()  # when servers start up, they begin as followers. 
+
+        # statistic info
+        self._statistic_interval = 1
+        self._requests = 0
+        self._last_time = 0
+        self._last_requests = 0
+        self._requests_per_sec = 0
 
     @property
     def _last_log_index(self):
@@ -725,6 +734,8 @@ class RaftStateMachine():
 
     def _server_response(self, node, serial_number, success, data):
         """ invoked by leader to respond client request """
+        if success:
+            self._last_requests += 1
         message = {
                 'type': 'server_response',
                 'success' : success,
@@ -840,6 +851,18 @@ class RaftStateMachine():
                                         self._election_timeout_handler,
                                         self._get_random_election_timeout())
 
+    def _statistic_handler(self):
+        now = time.time()
+        self._requests_per_sec = self._last_requests / (now - self._last_time)
+        self._requests += self._last_requests
+        self._last_time = now
+        self._last_requests = 0
+
+    def _show_statistic_info_handler(self):
+        start_time, fired_file_events, fired_time_events, skew, load_since_up, load_current = self._eventloop.statistic()
+        logger.warning("| RPS: %3.4f | current load: %-3.4f%% | load: %3.4f%% | swek %.4f |" %
+                    (self._requests_per_sec, load_current, load_since_up, skew))
+
     def run(self):
         def handler(signum, _):
             logger.info("Signal [%d] received. stop eventloop..." % signum)
@@ -847,6 +870,14 @@ class RaftStateMachine():
             self._eventloop.stop()
         signal.signal(signal.SIGINT, handler)
         signal.signal(signal.SIGTERM, handler)
+
+        self._eventloop.register_time_event(self._statistic_interval,
+                                            self._statistic_handler,
+                                            self._statistic_interval)
+        if self._config['show_statistic']:
+            self._eventloop.register_time_event(self._statistic_interval,
+                                        self._show_statistic_info_handler,
+                                        self._statistic_interval)
 
         self._eventloop.run()
 

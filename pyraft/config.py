@@ -38,7 +38,7 @@ def get_config(args):
     shortopts = 'h'
     longopts = ['election_timeout_min=','election_timeout_max=','heartbeat_timeout_min=','heartbeat_timeout_max=',
                 'max_log_entries_per_call=','raft_log_file=','connect_retry_interval=','send_buffer_size=','recv_buffer_size=',
-                'log_file=', 'log_level_core=','log_level_network=', 'help']
+                'log_file=', 'log_level_core=','log_level_network=', 'show_statistic', 'help']
     try:
         optlist, args = getopt.getopt(args, shortopts, longopts)
     except getopt.GetoptError as e:
@@ -47,20 +47,21 @@ def get_config(args):
 
     config = {
         # raft core
-        'election_timeout_min': 5000,    # in milliseconds
-        'election_timeout_max': 10000,   # in milliseconds
-        'heartbeat_timeout_min': 2000,   # in milliseconds
-        'heartbeat_timeout_max': 4000,   # in milliseconds
-        'max_log_entries_per_call': 10,
+        'election_timeout_min': 500,    # in milliseconds
+        'election_timeout_max': 1000,   # in milliseconds
+        'heartbeat_timeout_min': 10,   # in milliseconds
+        'heartbeat_timeout_max': 10,   # in milliseconds
+        'max_log_entries_per_call': 50,
         'raft_log_file': None,           # use MemLog if None else PersistLog
         # network
         'connect_retry_interval': 5,     # in seconds
-        'send_buffer_size': 2**13,# in bytes
-        'recv_buffer_size': 2**13,# in bytes
+        'send_buffer_size': 2**25,# in bytes
+        'recv_buffer_size': 2**25,# in bytes
         # log
         'log_file': None,                # if None, log to stdout and stderr
-        'log_level_core':  logging.INFO,
-        'log_level_network': logging.INFO
+        'log_level_core':  logging.WARNING,
+        'log_level_network': logging.WARNING,
+        'show_statistic': True
     }
 
     for key, value in optlist:
@@ -90,6 +91,8 @@ def get_config(args):
             config['log_level_core'] = getattr(logging, value)
         elif key == '--log_level_network':
             config['log_level_network'] = getattr(logging, value)
+        elif key == '--show_statistic':
+            config['show_statistic'] = True
 
     try:
         self = args[0]

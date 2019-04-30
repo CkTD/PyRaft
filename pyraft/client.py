@@ -9,7 +9,7 @@ import os
 import logging
 
 logging.basicConfig(
-        level=logging.DEBUG,
+        level=logging.ERROR,
         # filename='client.log',
         format="%(asctime)s %(levelname)-7s %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S")
@@ -27,7 +27,7 @@ def geterror(err):
 class RaftClient():
     def __init__(self, nodes, max_retry = 3, time_out = 5):
         self._nodes = list(nodes)
-        self._leader = None
+        self._leader = "127.0.0.1:8000"
         self._max_retry = max_retry
         self._time_out = time_out
 

@@ -328,6 +328,7 @@ class RaftStateMachine():
         self._on_readonly = None            # handler for readonly request
         # max number of entries in a single append entries request
         self._max_entries_per_call = self._config['max_log_entries_per_call']
+        self._index_success = 0
         self._expected_next_index = {}
 
         self._to_follower()  # when servers start up, they begin as followers. 
@@ -338,6 +339,7 @@ class RaftStateMachine():
         self._last_time = 0
         self._last_requests = 0
         self._requests_per_sec = 0
+
 
     @property
     def _last_log_index(self):
@@ -590,8 +592,16 @@ class RaftStateMachine():
                         logger.info("append_entries_response for old term. ignore")
                         return
                     if m_next != self._expected_next_index[node]:
-                        logger.info("append_entries_response for previous index. ignore")
+                        self._max_entries_per_call = max((int(self._max_entries_per_call * 0.8),2))
+                        logger.warning("append_entries_response for previous index. ignore")
+                        self._index_success = 0
                         return
+                    else:
+                        if self._max_entries_per_call < self._config['max_log_entries_per_call']:
+                            self._index_success += 1
+                            if self._index_success > 500:
+                                self._max_entries_per_call += 1
+                                self._index_success = 0
                     # now, the node must be a valid follower.
                     self._devoted_followers +=1
                     self._leader_check_readonly_request()

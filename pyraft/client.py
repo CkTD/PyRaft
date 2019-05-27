@@ -9,7 +9,7 @@ import os
 import logging
 
 logging.basicConfig(
-        level=logging.ERROR,
+        level=logging.DEBUG,
         # filename='client.log',
         format="%(asctime)s %(levelname)-7s %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S")

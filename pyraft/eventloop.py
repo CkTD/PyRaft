@@ -127,6 +127,7 @@ class EventLoop():
         self._statistic_handler_id = self.register_time_event(self._statistic_interval, 
                                                               self._statistic_handler, 
                                                               self._statistic_interval)
+    
     def _on_end(self):
         logger.info("eventloop stopped")
         self.unregister_time_event(self._statistic_handler_id)

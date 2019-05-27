@@ -5,10 +5,11 @@ import logging
 import signal
 import time
 import os
+import stat
 import struct 
 import pickle
 
-from .config import get_config, init_log
+from .config import get_config, init_log, err_exit
 from .network import TcpTransport
 from .network import EventLoop
 
@@ -82,7 +83,6 @@ class MemoryLog():
         """ return at most #length logs, firest log having index = start"""
         return self._l[start - 1:start - 1 + length]
 
-import stat
 class PersistLog():
     """ 
     log is a tuple: (term, serial, command)
@@ -155,6 +155,9 @@ class PersistLog():
         if index <= 0:
             raise KeyError("first log index is 1")
         return self._get_by_index(index)
+
+    def last_index(self):
+        return self._last_index
 
     def add(self, term ,serial_number, command):
         self._last_index += 1
@@ -280,7 +283,9 @@ class RaftStateMachine():
         else:
             self._log = MemoryLog()
 
-        ### volatile state on all servers ###
+        ### state on all servers ###
+        # this state can be persist iff using PersistLog and 
+        # rebuild_state_on_recovery is set to False, else they are volatile 
         # index of highest log entry known to be committed
         # initialized to 0, increases monotonically
         self._commit_index = 0  
@@ -355,18 +360,39 @@ class RaftStateMachine():
     def _load_state(self):
         filename = self._config['raft_log_file'] + ".state"
         if os.path.isfile(filename):
-            term, votefor = open(filename, "r").read().split(" ")
+            state = open(filename, "r").read().split(" ")
+            if len(state) not in (2,4):
+                err_exit("Can't recovery state. Bad format for state file %s" % filename)
+            term, votedfor  = state[:2]
             self._current_term = int(term)
-            self._voted_for = votefor
-        
+            self._voted_for = votedfor if votedfor != 'None' else None
+            logger.info('Load state from [%s]. Term: [%d]. Voted for: [%s]' % (filename, self._current_term, self._voted_for))
+            if not self._config['rebuild_state_on_recovery']:
+                try:
+                    commit_index, last_applied = state[2:]
+                except ValueError:
+                    err_exit("Can't recovery state. "
+                             "The state file was stored with rebuild_state_on_recovery set,"
+                             "but this option is not set for current instance.")
+                self._commit_index = int(commit_index)
+                self._last_applied = int(last_applied)
+                assert self._commit_index <= self._log.last_index()
+                self._apply_log()
+                logger.info("Load state with rebuild_state_on_recovery not set. Commit_index: [%d]. Last_applied: [%d]." % (self._commit_index, self._last_applied))
+        else:
+            logger.info("Load state: state file [%s] not exist." % filename)
+
     def _do_persist(self):
         if isinstance(self._log, PersistLog):
             filename = self._config['raft_log_file'] + ".state"
             self._log.flush()
-            f = open(filename, "w")
-            f.write(" ".join((str(self._current_term), str(self._voted_for))))
-            f.flush()
-            f.close()
+
+            with open(filename, "w") as f:
+                state = [str(self._current_term), str(self._voted_for)]
+                if not self._config['rebuild_state_on_recovery']:
+                    state += [str(self._commit_index), str(self._last_applied)]
+                f.write(" ".join(state))
+                f.flush()
 
     def set_on_apply_log(self, callback):
         self._on_apply_log = callback
@@ -509,9 +535,9 @@ class RaftStateMachine():
                             (self._last_log_term == m_last_log_term and
                             self._last_log_index > m_last_log_index) ):
                         logger.info("vote for %s" % node)
-                        self._request_vote_response(node, True)
-                        self._do_persist()
                         self._voted_for = node
+                        self._do_persist()
+                        self._request_vote_response(node, True)
                     else:
                         if self._voted_for is not None:
                             logger.info("reject request_vote by [%s]. already voted for [%s]" %(node, self._voted_for))
@@ -536,11 +562,13 @@ class RaftStateMachine():
                 m_prev_log_term = message['prev_log_term']
                 m_entries = message['entries']
                 m_leader_commit = message['leader_commit']
+
+                if m_term != self._current_term:
+                    logger.info('reject append_entry from old term[%d].'% m_term)
+                    self._append_entries_response(node, False, 0)
+                    return
+                
                 if self._state in (NODE_STATE.CANDIDATE, NODE_STATE.FOLLOWER):
-                    if m_term != self._current_term:
-                        logger.info('reject append_entry from old term[%d].'% m_term)
-                        self._append_entries_response(node, False, 0)
-                        return
                     # candidate find there is already a leader for this term.
                     if self._state == NODE_STATE.CANDIDATE:
                         logger.info('new leader [%s] detected in this term' % node)
@@ -583,6 +611,8 @@ class RaftStateMachine():
                             self._commit_index += 1
                             self._commit_serial.add(self._log.get_serial_number(self._commit_index))
                         self._apply_log()
+                else:
+                    assert False # it is impossible to have different leaders in same term.
 
             elif m_type == 'append_entries_response':
                 m_success = message['success']
@@ -852,6 +882,7 @@ class RaftStateMachine():
             if not self._log.get_serial_number(self._last_applied):
                 continue
             self._on_apply_log(self._log.get_command(self._last_applied))
+            logger.debug("apply log #%d" % self._last_applied)
 
     def _reset_election_timeout(self):
         if self._election_timeout_id is not None:
@@ -875,7 +906,7 @@ class RaftStateMachine():
 
     def run(self):
         def handler(signum, _):
-            logger.info("Signal [%d] received. stop eventloop..." % signum)
+            logger.info("Signal [%d] received. stopping eventloop..." % signum)
             self._do_persist()
             self._eventloop.stop()
         signal.signal(signal.SIGINT, handler)
@@ -886,8 +917,8 @@ class RaftStateMachine():
                                             self._statistic_interval)
         if self._config['show_statistic']:
             self._eventloop.register_time_event(self._statistic_interval,
-                                        self._show_statistic_info_handler,
-                                        self._statistic_interval)
+                                                self._show_statistic_info_handler,
+                                                self._statistic_interval)
 
         self._eventloop.run()
 

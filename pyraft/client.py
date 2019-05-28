@@ -27,7 +27,7 @@ def geterror(err):
 class RaftClient():
     def __init__(self, nodes, max_retry = 3, time_out = 5):
         self._nodes = list(nodes)
-        self._leader = "127.0.0.1:8000"
+        self._leader = self._nodes[random.randrange(0, len(self._nodes))]
         self._max_retry = max_retry
         self._time_out = time_out
 
@@ -87,8 +87,10 @@ class RaftClient():
                 node_addr = self._get_addr()
                 response = self._request(command, serial_number, node_addr, readonly)
             except socket.timeout as e:
+                self._leader = None
                 logging.debug('id: [%s], [%d] times try, [%s], failed, [%s]' % (serial_number, _ + 1 , str(node_addr), str(e)))
             except OSError as e:
+                self._leader = None
                 if e.errno not in (errno.ECONNREFUSED, errno.ECONNRESET, errno.EPIPE, errno.ENOTCONN):
                     raise e
                 logging.debug('id: [%s], [%d] times try, [%s], failed, [%s]' % (serial_number, _ + 1 , str(node_addr), geterror(e)))

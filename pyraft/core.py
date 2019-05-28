@@ -901,8 +901,8 @@ class RaftStateMachine():
 
     def _show_statistic_info_handler(self):
         start_time, fired_file_events, fired_time_events, skew, load_since_up, load_current = self._eventloop.statistic()
-        logger.warning("| RPS: %3.4f | current load: %-3.4f%% | load: %3.4f%% | swek %.4f |" %
-                    (self._requests_per_sec, load_current, load_since_up, skew))
+        logger.warning("| RPS: %3.4f | current load: %-3.4f%% | load: %3.4f%% | swek %.4f(%.4f) |" %
+                    (self._requests_per_sec, load_current, load_since_up, skew, skew/fired_time_events))
 
     def run(self):
         def handler(signum, _):

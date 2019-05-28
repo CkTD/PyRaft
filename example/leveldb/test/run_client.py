@@ -72,10 +72,10 @@ def fio(nums, value_size):
 
 if __name__ == '__main__':
     total_size = 128 * 1024 * 1024
-    value_size = 1 * 1024
+    value_size = 4 * 1024
     nums = int(total_size/value_size)
 
-    fio(nums, value_size)
+    #fio(nums, value_size)
 
     number_per_c = int(nums/100)
     begin = 0
@@ -91,6 +91,7 @@ if __name__ == '__main__':
     
     print("raft:", raft_time)
 
-# 1k 7.28 41.60
-# 2k 6.70 33.02
-# 
+# 1k 7.01 45.09
+# 2k 6.66 31.67
+# 4k 5.71 12.26
+# 8k 6.31 18.58

@@ -81,7 +81,7 @@ def get_config(args):
         elif key == '--heartbeat_timeout_min':
             config['heartbeat_timeout_min'] = int(value)
         elif key == '--heartbeat_timeout_max':
-            config['heartbeat_timeout_min'] = int(value)
+            config['heartbeat_timeout_max'] = int(value)
         elif key == '--max_log_entries_per_call':
             config['max_log_entries_per_call'] = int(value)
         elif key == '--raft_log_file':
